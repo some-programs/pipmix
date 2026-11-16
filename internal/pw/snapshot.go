@@ -1,0 +1,65 @@
+package pw
+
+// A Snapshot is the mixer's state at one moment.
+type Snapshot struct {
+	Connected bool
+	Err       error
+	Nodes     []Node // ordered by ID
+	Cards     []Card // ordered by ID
+}
+
+// A Class is the kind of audio node.
+type Class int
+
+const (
+	Playback Class = iota
+	Recording
+	Sink
+	Source
+)
+
+// A Node is an audio stream or device.
+type Node struct {
+	ID       uint32
+	Class    Class
+	Name     string
+	Props    map[string]string
+	Client   string
+	Title    string
+	JACK     bool
+	Channels []Channel
+	Mute     bool
+	Default  bool
+	Routes   []Route
+	Route    int // active index in Routes, or -1
+}
+
+// A Channel is one channel's volume on the cubic scale (1 is 100%).
+type Channel struct {
+	Name   string
+	Volume float64
+}
+
+// A Route is a port of a sound card.
+type Route struct {
+	Index       int32
+	Name        string
+	Description string
+	Available   bool
+}
+
+// A Card is an audio device and its profiles.
+type Card struct {
+	ID       uint32
+	Title    string
+	Profiles []Profile
+	Profile  int // active index in Profiles, or -1
+}
+
+// A Profile is a configuration of a card.
+type Profile struct {
+	Index       int32
+	Name        string
+	Description string
+	Available   bool
+}
