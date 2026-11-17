@@ -51,8 +51,10 @@ const (
 
 var meterLookFlags = []string{"solid", "shade", "dot"}
 
-type meterMsg struct{}
-type meterTickMsg struct{}
+type (
+	meterMsg     struct{}
+	meterTickMsg struct{}
+)
 
 func (m *mixer) waitMeter() tea.Cmd {
 	if m.meter == nil {
@@ -93,7 +95,7 @@ func (m *mixer) meterTargets() map[uint32]pulse.Target {
 }
 
 func meterTarget(n *pw.Node) (pulse.Target, bool) {
-	if n == nil || n.JACK || len(n.Channels) == 0 {
+	if n == nil || len(n.Channels) == 0 {
 		return pulse.Target{}, false
 	}
 	var names []string
@@ -101,12 +103,16 @@ func meterTarget(n *pw.Node) (pulse.Target, bool) {
 		names = append(names, c.Name)
 	}
 	t := pulse.Target{Name: n.Name, Channels: names}
-	switch n.Class {
-	case pw.Sink:
+	switch {
+	case n.JACK && n.Class == pw.Playback:
+		t.Kind, t.Serial, t.Name = pulse.JACK, n.ID, ""
+	case n.JACK:
+		return pulse.Target{}, false
+	case n.Class == pw.Sink:
 		t.Kind = pulse.Sink
-	case pw.Source:
+	case n.Class == pw.Source:
 		t.Kind = pulse.Source
-	case pw.Playback:
+	case n.Class == pw.Playback:
 		serial, err := strconv.ParseUint(n.Props["object.serial"], 10, 32)
 		if err != nil {
 			return pulse.Target{}, false
@@ -222,7 +228,9 @@ func (m *mixer) setLevels(snap *pulse.Snapshot, now time.Time) (moving bool) {
 func (m *mixer) shown(raw map[uint32][]float64) map[uint32][]float64 {
 	nodes := make(map[uint32]*pw.Node)
 	for i := range m.snap.Nodes {
-		nodes[m.snap.Nodes[i].ID] = &m.snap.Nodes[i]
+		if len(m.snap.Nodes[i].Channels) > 0 {
+			nodes[m.snap.Nodes[i].ID] = &m.snap.Nodes[i]
+		}
 	}
 	shown := make(map[uint32][]float64)
 	for id, levels := range raw {

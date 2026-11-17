@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"log"
+	"os"
 	"sync/atomic"
 	"time"
 )
@@ -16,6 +17,10 @@ const (
 
 // A Client is a connection to PipeWire that reconnects when lost.
 type Client struct {
+	// PID is the process ID used to identify this instance's meter streams.
+	// Defaults to os.Getpid() if zero.
+	PID int
+
 	log     *log.Logger
 	cmds    chan func(*session)
 	snap    atomic.Pointer[Snapshot]
@@ -28,6 +33,7 @@ func NewClient(logger *log.Logger) *Client {
 		logger = log.New(io.Discard, "", 0)
 	}
 	c := &Client{
+		PID:     os.Getpid(),
 		log:     logger,
 		cmds:    make(chan func(*session), 256),
 		updated: make(chan struct{}, 1),
@@ -98,6 +104,18 @@ func (c *Client) SetDefault(node uint32) {
 	c.do(func(s *session) { s.setDefault(node) })
 }
 
+// JackMeterReady unlinks a JACK meter stream from its initial target once
+// pipewire-pulse has created the stream, leaving only the JACK node's links.
+func (c *Client) JackMeterReady(ctx context.Context, name string) {
+	done := make(chan struct{})
+	c.do(func(s *session) { s.jackMeterReady(name, done) })
+	select {
+	case <-done:
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+	}
+}
+
 // Run connects and keeps the connection up until ctx is done.
 func (c *Client) Run(ctx context.Context) {
 	backoff := minBackoff
@@ -153,7 +171,7 @@ func (c *Client) session(ctx context.Context) error {
 		}
 	}()
 
-	s := newSession(conn, c.log)
+	s := newSession(conn, c.log, c.PID)
 	s.start()
 	var expiry *time.Timer
 	for s.err == nil {

@@ -60,6 +60,9 @@ func (m *mixer) click(mouse tea.Mouse) tea.Cmd {
 			if mouse.X < barX-2 || mouse.X >= barX+m.barWidth() {
 				return nil
 			}
+			if it.node.JACK {
+				return m.setVolume100()
+			}
 			channel := -1
 			if m.isUnlocked(it) {
 				channel = line.channel
@@ -90,6 +93,9 @@ func (m *mixer) click(mouse tea.Mouse) tea.Cmd {
 		case lineChannel:
 			if mouse.X < barX-2 || mouse.X >= barX+m.barWidth() {
 				return nil
+			}
+			if it.node.JACK {
+				return m.setVolume100()
 			}
 			channel := -1
 			if m.isUnlocked(it) {

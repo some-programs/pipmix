@@ -433,7 +433,7 @@ func (p *parser) dict() map[string]string {
 	return m
 }
 
-// paramInfo reads the param list of an Info event,
+// paramInfo reads the param list of a Node::info or Device::info event,
 // Struct(Int n, (Id id, Int flags)*), as a map from id to flags.
 func (p *parser) paramInfo() map[uint32]uint32 {
 	f := p.fields()

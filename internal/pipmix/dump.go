@@ -154,7 +154,11 @@ func dumpNodes(w io.Writer, s *pw.Snapshot, shown map[uint32]bool, opts options)
 			fmt.Fprintln(w, "  hidden: duplicates a multi-channel stream")
 		}
 		for _, ch := range n.Channels {
-			fmt.Fprintf(w, "    %-4s %3.0f%%\n", ch.Name, ch.Volume*100)
+			if n.JACK {
+				fmt.Fprintf(w, "    %s\n", ch.Name)
+			} else {
+				fmt.Fprintf(w, "    %-4s %3.0f%%\n", ch.Name, ch.Volume*100)
+			}
 		}
 		for i, r := range n.Routes {
 			mark := " "

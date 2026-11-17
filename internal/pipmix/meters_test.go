@@ -21,7 +21,8 @@ func meterSnapshot() *pw.Snapshot {
 	}
 	s.Nodes = append(s.Nodes,
 		pw.Node{ID: 40, Class: pw.Recording, Name: "rec", Title: "Recorder", Channels: stereo(1)},
-		pw.Node{ID: 41, Class: pw.Playback, Name: "jack", Title: "jackd", JACK: true},
+		pw.Node{ID: 41, Class: pw.Playback, Name: "jack", Title: "jackd", JACK: true, Channels: []pw.Channel{{Name: "out_1", Volume: 1}, {Name: "out_2", Volume: 1}}},
+		pw.Node{ID: 41, Class: pw.Recording, Name: "jack", Title: "jackd", JACK: true},
 		pw.Node{ID: 42, Class: pw.Source, Name: "mic", Title: "Mic", Channels: []pw.Channel{{Name: "MONO", Volume: 1}}},
 	)
 	return s
@@ -42,13 +43,23 @@ func TestMeterTargets(t *testing.T) {
 	m.refocus()
 
 	got := m.meterTargets()
-	if keys := targetKeys(got); !slices.Equal(keys, []uint32{10, 11, 12}) {
-		t.Fatalf("playback targets %v, want 10 11 12 (no JACK client)", keys)
+	if keys := targetKeys(got); !slices.Equal(keys, []uint32{10, 11, 12, 41}) {
+		t.Fatalf("playback targets %v, want 10 11 12 41", keys)
 	}
 	want := pulse.Target{Kind: pulse.Stream, Serial: 101, Channels: []string{"FL", "FR"}}
 	if !got[11].Equal(want) {
 		t.Errorf("target of 11 = %+v, want %+v", got[11], want)
 	}
+	wantJACK := pulse.Target{Kind: pulse.JACK, Serial: 41, Channels: []string{"out_1", "out_2"}}
+	if !got[41].Equal(wantJACK) {
+		t.Errorf("target of 41 = %+v, want %+v", got[41], wantJACK)
+	}
+
+	m.opts.jack = false
+	if keys := targetKeys(m.meterTargets()); !slices.Equal(keys, []uint32{10, 11, 12}) {
+		t.Fatalf("playback targets without jack %v, want 10 11 12", keys)
+	}
+	m.opts.jack = true
 
 	m.setTab(tabOutputs)
 	want = pulse.Target{Kind: pulse.Sink, Name: "sink", Channels: []string{"FL", "FR"}}
@@ -118,10 +129,11 @@ func TestLevels(t *testing.T) {
 		10: {0.125, 1},     // a stream: after its volume already
 		12: {1, 1},         // muted
 		20: {0.125, 0.125}, // a sink at 100%: before its volume
+		41: {0.125, 0.512}, // a duplex JACK client: uses its playback channels
 		99: {1},            // gone
 		11: {1},            // channels don't match
 	}), now)
-	for id, want := range map[uint32][]float64{10: {0.5, 1}, 12: {0, 0}, 20: {0.5, 0.5}, 99: nil, 11: nil} {
+	for id, want := range map[uint32][]float64{10: {0.5, 1}, 12: {0, 0}, 20: {0.5, 0.5}, 41: {0.5, 0.8}, 99: nil, 11: nil} {
 		if !near(m.fill[id], want) || !near(m.dot[id], want) {
 			t.Errorf("node %d: fill %v, peak %v; want %v", id, m.fill[id], m.dot[id], want)
 		}
@@ -224,6 +236,20 @@ func TestBarLevel(t *testing.T) {
 	} {
 		if got := ansi.Strip(bar(tc.v, tc.level, tc.peak, 16, 1.5, tc.muted, tc.look)); got != tc.want {
 			t.Errorf("bar(%v, %v, %v, 16, %v, look %d) = %q, want %q", tc.v, tc.level, tc.peak, tc.muted, tc.look, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		level, peak float64
+		look        meterLook
+		want        string
+	}{
+		{0, 0, meterSolid, "░░░░░░░░░░░░░░░░"},
+		{0.3, 0.7, meterSolid, "███░░░█░░░░░░░░░"},
+		{0.5, 0, meterDot, "░░░░█░░░░░░░░░░░"},
+		{0.5, 0.7, meterOff, "░░░░░░░░░░░░░░░░"},
+	} {
+		if got := ansi.Strip(meterBar(tc.level, tc.peak, 16, 1.5, tc.look)); got != tc.want {
+			t.Errorf("meterBar(%v, %v, 16, look %d) = %q, want %q", tc.level, tc.peak, tc.look, got, tc.want)
 		}
 	}
 }

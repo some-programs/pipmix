@@ -37,13 +37,14 @@ const (
 	Sink Kind = iota
 	Source
 	Stream
+	JACK
 )
 
 // A Target is a node to measure.
 type Target struct {
 	Kind     Kind
 	Name     string // node.name of a Sink or Source
-	Serial   uint32 // object.serial of a Stream
+	Serial   uint32 // object.serial of a Stream, or node ID of a JACK client
 	Channels []string
 }
 
@@ -53,6 +54,8 @@ func (t Target) String() string {
 		return "sink " + t.Name
 	case Source:
 		return "source " + t.Name
+	case JACK:
+		return fmt.Sprintf("jack node %d", t.Serial)
 	}
 	return fmt.Sprintf("stream serial %d", t.Serial)
 }
@@ -67,13 +70,24 @@ type Snapshot struct {
 	Averages map[uint32][]float64
 }
 
+var meterInst atomic.Uint32 // distinguishes meter instances within the same process
+
 // A Meter measures the levels of a set of targets.
 type Meter struct {
+	// Prefix is the prefix used for naming PipeWire nodes of meter streams.
+	Prefix string
+
+	// JACKReady is invoked with the meter stream's PipeWire node.name once a
+	// JACK record stream is created, so its non-JACK links can be removed
+	// before peaks are read.
+	JACKReady func(ctx context.Context, name string)
+
 	log     *log.Logger
 	rate    int
 	want    chan map[uint32]Target
 	snap    atomic.Pointer[Snapshot]
 	updated chan struct{}
+	seq     atomic.Uint32 // ensures unique node.name per stream across concurrent workers
 }
 
 // NewMeter returns a meter whose streams send rate peaks per second
@@ -85,7 +99,9 @@ func NewMeter(logger *log.Logger, rate int) *Meter {
 	if rate <= 0 {
 		rate = DefaultRate
 	}
+	inst := meterInst.Add(1)
 	m := &Meter{
+		Prefix:  fmt.Sprintf("pipmix.meter.%d.%d.", os.Getpid(), inst),
 		log:     logger,
 		rate:    rate,
 		want:    make(chan map[uint32]Target, 1),
@@ -281,16 +297,30 @@ func (m *Meter) stream(ctx context.Context, t Target, send func(peaks, avgs []fl
 	stop := context.AfterFunc(ctx, func() { nc.Close() })
 	defer stop()
 
+	var nodeName string
+	switch t.Kind {
+	case JACK:
+		nodeName = fmt.Sprintf("%sjack.%d.%d", m.Prefix, t.Serial, m.seq.Add(1))
+	case Sink:
+		nodeName = fmt.Sprintf("%ssink.%d", m.Prefix, m.seq.Add(1))
+	case Source:
+		nodeName = fmt.Sprintf("%ssource.%d", m.Prefix, m.seq.Add(1))
+	case Stream:
+		nodeName = fmt.Sprintf("%sstream.%d.%d", m.Prefix, t.Serial, m.seq.Add(1))
+	}
 	nc.SetReadDeadline(time.Now().Add(createWait))
 	m.log.Printf("pulse: %v: creating a record stream; the reply waits for the node to run", t)
 	asked := time.Now()
-	index, channels, err := c.create(t, m.rate)
+	index, channels, err := c.create(t, m.rate, nodeName)
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
 		return false, errIdle
 	}
 	if err != nil {
 		return false, err
+	}
+	if t.Kind == JACK && m.JACKReady != nil {
+		m.JACKReady(ctx, nodeName)
 	}
 	nc.SetDeadline(time.Time{})
 	m.log.Printf("pulse: %v: record stream %d created after %v", t, index, time.Since(asked).Round(time.Millisecond))
@@ -300,9 +330,14 @@ func (m *Meter) stream(ctx context.Context, t Target, send func(peaks, avgs []fl
 	alpha := 1 - math.Exp(-1/(float64(m.rate)*averageTime.Seconds()))
 	var last, lastAvgs []float64
 	silent, since := true, time.Now()
+	skip := t.Kind == JACK
+	if skip {
+		nc.SetReadDeadline(time.Now().Add(max(stale, 3*m.Interval())))
+	}
 	for {
 		p, err := readPacket(nc)
 		if errors.As(err, &ne) && ne.Timeout() {
+			skip = false
 			nc.SetReadDeadline(time.Time{})
 			silent, since = true, time.Now()
 			m.log.Printf("pulse: %v: no peaks for %v; showing 0 until they come", t, max(stale, 3*m.Interval()))
@@ -326,6 +361,11 @@ func (m *Meter) stream(ctx context.Context, t Target, send func(peaks, avgs []fl
 			continue
 		}
 		if len(p.data) < frame {
+			continue
+		}
+		if skip {
+			skip = false
+			nc.SetReadDeadline(time.Now().Add(max(stale, 3*m.Interval())))
 			continue
 		}
 		// Usually one frame; if more came, each channel's largest.
@@ -460,7 +500,7 @@ func (c *conn) handshake() error {
 
 // create opens a peak-detect record stream for t and returns its index and
 // channel count.
-func (c *conn) create(t Target, rate int) (uint32, int, error) {
+func (c *conn) create(t Target, rate int, nodeName string) (uint32, int, error) {
 	positions := []byte{0}
 	if len(t.Channels) > 0 {
 		positions = positions[:0]
@@ -478,6 +518,8 @@ func (c *conn) create(t Target, rate int) (uint32, int, error) {
 		b.string(t.Name + ".monitor")
 	case Source:
 		b.string(t.Name)
+	case JACK:
+		b.string("@DEFAULT_MONITOR@")
 	default:
 		b.null()
 	}
@@ -491,7 +533,11 @@ func (c *conn) create(t Target, rate int) (uint32, int, error) {
 	}
 	b.bool(true) // peak_detect
 	b.bool(true) // adjust_latency
-	b.proplist([][2]string{{"media.name", "Peak meter"}})
+	props := [][2]string{{"media.name", "Peak meter"}}
+	if nodeName != "" {
+		props = append(props, [2]string{"node.name", nodeName})
+	}
+	b.proplist(props)
 	direct := uint32(invalidIndex)
 	if t.Kind == Stream {
 		direct = t.Serial
@@ -507,9 +553,11 @@ func (c *conn) create(t Target, rate int) (uint32, int, error) {
 	}
 	b.cvolume(volumes)
 	// muted, volume_set, muted_set, relative_volume, passthrough
-	for range 5 {
-		b.bool(false)
-	}
+	b.bool(false) // muted
+	b.bool(true)  // volume_set
+	b.bool(true)  // muted_set
+	b.bool(false) // relative_volume
+	b.bool(false) // passthrough
 	if err := writePacket(c.c, b.b); err != nil {
 		return 0, 0, err
 	}

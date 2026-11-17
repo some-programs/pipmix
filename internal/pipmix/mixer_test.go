@@ -26,8 +26,10 @@ func testSnapshot() *pw.Snapshot {
 			{ID: 10, Class: pw.Playback, Name: "a", Title: "Player A", Channels: stereo(0.5)},
 			{ID: 11, Class: pw.Playback, Name: "b", Title: "Player B", Channels: stereo(1)},
 			{ID: 12, Class: pw.Playback, Name: "c", Title: "Player C", Channels: stereo(1.2), Mute: true},
-			{ID: 20, Class: pw.Sink, Name: "sink", Title: "Speakers", Channels: stereo(1), Default: true,
-				Routes: []pw.Route{{Index: 0, Description: "Speakers"}, {Index: 1, Description: "Headphones"}}, Route: 1},
+			{
+				ID: 20, Class: pw.Sink, Name: "sink", Title: "Speakers", Channels: stereo(1), Default: true,
+				Routes: []pw.Route{{Index: 0, Description: "Speakers"}, {Index: 1, Description: "Headphones"}}, Route: 1,
+			},
 		},
 		Cards: []pw.Card{{ID: 30, Title: "Card", Profile: 0, Profiles: []pw.Profile{
 			{Index: 0, Description: "Duplex"}, {Index: 1, Description: "Off"},
@@ -419,8 +421,10 @@ func TestCardsSpaced(t *testing.T) {
 func TestTitleColumns(t *testing.T) {
 	m := testMixer()
 	s := testSnapshot()
-	s.Nodes = append(s.Nodes, pw.Node{ID: 21, Class: pw.Sink, Name: "hdmi", Title: "HDMI Output With A Long Name", Channels: stereo(1),
-		Routes: []pw.Route{{Index: 0, Description: "HDMI"}}, Route: 0, Mute: true})
+	s.Nodes = append(s.Nodes, pw.Node{
+		ID: 21, Class: pw.Sink, Name: "hdmi", Title: "HDMI Output With A Long Name", Channels: stereo(1),
+		Routes: []pw.Route{{Index: 0, Description: "HDMI"}}, Route: 0, Mute: true,
+	})
 	m.snap = s
 	m.handleKey("4")
 	lines := strings.Split(ansi.Strip(m.view()), "\n")
@@ -513,8 +517,12 @@ func TestTypeStrip(t *testing.T) {
 		id    uint32
 		strip string
 	}{
-		{tabDefault, 20, strip(pw.Sink)}, {tabDefault, 10, strip(pw.Playback)}, {tabPlayback, 10, strip(pw.Playback)},
-		{tabRecording, 40, strip(pw.Recording)}, {tabOutputs, 20, strip(pw.Sink)}, {tabInputs, 22, strip(pw.Source)},
+		{tabDefault, 20, strip(pw.Sink)},
+		{tabDefault, 10, strip(pw.Playback)},
+		{tabPlayback, 10, strip(pw.Playback)},
+		{tabRecording, 40, strip(pw.Recording)},
+		{tabOutputs, 20, strip(pw.Sink)},
+		{tabInputs, 22, strip(pw.Source)},
 		{tabCards, 30, card},
 	} {
 		m.setTab(tc.tab)
@@ -550,7 +558,10 @@ func TestTypeStrip(t *testing.T) {
 
 func TestJACKClient(t *testing.T) {
 	m := testMixer()
-	jack := pw.Node{ID: 5, Class: pw.Playback, Name: "dtime", Title: "dtime", JACK: true}
+	jack := pw.Node{
+		ID: 5, Class: pw.Playback, Name: "dtime", Title: "dtime", JACK: true,
+		Channels: []pw.Channel{{Name: "out_1", Volume: 1}, {Name: "out_2", Volume: 1}},
+	}
 	m.snap.Nodes = append([]pw.Node{jack}, m.snap.Nodes...)
 	m.refocus()
 	for _, tb := range []tab{tabDefault, tabPlayback} {
@@ -564,9 +575,16 @@ func TestJACKClient(t *testing.T) {
 		t.Fatalf("G: focus %d, want 5", id)
 	}
 	view := ansi.Strip(m.view())
-	if !strings.Contains(view, strings.Repeat(faderEmpty, m.barWidth())) || !strings.Contains(view, symSpeaker) || !strings.Contains(view, "JACK: dtime") {
+	if !strings.Contains(view, strings.Repeat(faderEmpty, m.barWidth())) || !strings.Contains(view, symSpeaker) || !strings.Contains(view, "JACK: dtime") || !strings.Contains(view, "2ch") {
 		t.Errorf("view:\n%s", view)
 	}
+	// Space unfolds individual JACK output ports to inspect their levels.
+	m.handleKey("space")
+	view = ansi.Strip(m.view())
+	if !strings.Contains(view, "┌ out_1") || !strings.Contains(view, "└ out_2") {
+		t.Errorf("unfolded JACK view:\n%s", view)
+	}
+	m.handleKey("space")
 	for _, key := range []string{"l", "m"} {
 		cmd := m.handleKey(key)
 		if cmd == nil {
@@ -576,12 +594,14 @@ func TestJACKClient(t *testing.T) {
 			t.Errorf("%s: %+v, want a JACK notice", key, msg)
 		}
 	}
-	cmd := m.click(tea.Mouse{X: muteX, Y: 7, Button: tea.MouseLeft})
-	if cmd == nil {
-		t.Fatal("click on the speaker: no notice")
-	}
-	if msg, ok := cmd().(noticeMsg); !ok || !strings.Contains(msg.text, "JACK client") {
-		t.Errorf("click on the speaker: %+v, want a JACK notice", msg)
+	for _, pt := range []struct{ x, y int }{{muteX, 7}, {barX + 2, 8}} {
+		cmd := m.click(tea.Mouse{X: pt.x, Y: pt.y, Button: tea.MouseLeft})
+		if cmd == nil {
+			t.Fatalf("click at (%d,%d): no notice", pt.x, pt.y)
+		}
+		if msg, ok := cmd().(noticeMsg); !ok || !strings.Contains(msg.text, "JACK client") {
+			t.Errorf("click at (%d,%d): %+v, want a JACK notice", pt.x, pt.y, msg)
+		}
 	}
 }
 
