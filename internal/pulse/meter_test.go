@@ -19,9 +19,16 @@ func TestPosition(t *testing.T) {
 		i    int
 		want byte
 	}{
-		{"MONO", 0, 0}, {"FL", 0, 1}, {"FR", 1, 2}, {"LFE", 3, 7}, {"SR", 5, 11},
-		{"AUX0", 0, 12}, {"AUX5", 0, 17}, {"AUX31", 0, 43},
-		{"UNKNOWN", 2, 14}, {"AUX99", 1, 13},
+		{"MONO", 0, 0},
+		{"FL", 0, 1},
+		{"FR", 1, 2},
+		{"LFE", 3, 7},
+		{"SR", 5, 11},
+		{"AUX0", 0, 12},
+		{"AUX5", 0, 17},
+		{"AUX31", 0, 43},
+		{"UNKNOWN", 2, 14},
+		{"AUX99", 1, 13},
 	} {
 		if got := position(tc.name, tc.i); got != tc.want {
 			t.Errorf("position(%q, %d) = %d, want %d", tc.name, tc.i, got, tc.want)
@@ -400,4 +407,44 @@ func TestMeterAverage(t *testing.T) {
 	if p := m.Snapshot().Peaks[1]; !slices.Equal(p, []float64{0.5}) {
 		t.Errorf("peaks %v, want [0.5]", p)
 	}
+}
+
+func TestMeterJACK(t *testing.T) {
+	s := newFakeServer(t)
+	m := NewMeter(nil, 0)
+	m2 := NewMeter(nil, 0)
+	if m2.Prefix == m.Prefix {
+		t.Errorf("m2 Prefix %q == m Prefix %q", m2.Prefix, m.Prefix)
+	}
+	m.Prefix = "pipmix.meter."
+	var readyName atomic.Value
+	m.JACKReady = func(_ context.Context, name string) {
+		readyName.Store(name)
+	}
+	ctx := t.Context()
+	go m.Run(ctx)
+
+	m.Watch(map[uint32]Target{
+		5: {Kind: JACK, Serial: 137, Channels: []string{"out_1", "out_2"}},
+	})
+	c := s.conn()
+	if c.source != "@DEFAULT_MONITOR@" || c.channels != 2 {
+		t.Fatalf("JACK stream records %q, %d channels; want @DEFAULT_MONITOR@, 2", c.source, c.channels)
+	}
+	for range 100 {
+		if readyName.Load() != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got, _ := readyName.Load().(string); got != "pipmix.meter.jack.137.1" {
+		t.Fatalf("readyName = %q, want pipmix.meter.jack.137.1", got)
+	}
+	// First frame after flush is skipped; the next frame is published.
+	c.peaks(t, 0.9, 0.9)
+	time.Sleep(5 * time.Millisecond)
+	c.peaks(t, 0.25, 0.75)
+	waitLevels(t, m, func(l map[uint32][]float64) bool {
+		return slices.Equal(l[5], []float64{0.25, 0.75})
+	})
 }

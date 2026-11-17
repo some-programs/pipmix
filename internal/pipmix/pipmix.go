@@ -54,10 +54,9 @@ func Run(args []string) error {
 		go http.Serve(ln, nil)
 	}
 
-	client := pw.NewClient(clientLog)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go client.Run(ctx)
+
 	var media *mpris.Watcher
 	if opts.titles {
 		media = mpris.NewWatcher(clientLog)
@@ -69,6 +68,12 @@ func Run(args []string) error {
 		meter = pulse.NewMeter(clientLog, opts.meterRate)
 		go meter.Run(ctx)
 	}
+
+	client := pw.NewClient(clientLog)
+	if meter != nil {
+		meter.JACKReady = client.JackMeterReady
+	}
+	go client.Run(ctx)
 	if debug.dump {
 		return dump(ctx, os.Stdout, &dumpLog, fs, opts, client, media, meter)
 	}

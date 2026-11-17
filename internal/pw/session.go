@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -56,108 +57,136 @@ const (
 	kindNode
 	kindDevice
 	kindMetadata
+	kindLink
 )
 
 // A proxy is the client side of a bound object.
 type proxy struct {
-	id     uint32
-	kind   proxyKind
-	global uint32
+	id     uint32    // client-side proxy identifier
+	kind   proxyKind // object type represented by this proxy
+	global uint32    // PipeWire registry global ID
 }
 
 type node struct {
-	id, proxy uint32
-	class     Class
-	props     map[string]string
-	params    map[uint32]uint32 // param id → flags, from the last Info
-
-	// jack marks a JACK client. It has no media class and no volume; its
-	// ports tell whether it plays, records or both.
-	jack              bool
-	inPorts, outPorts int32
-
-	known    bool      // volumes, channels and mute have been read
-	volumes  []float32 // linear
-	channels []uint32
-	mute     bool
-
-	// What the client last set, and until when it wins.
-	pendingVolumes []float32
-	pendingMute    *bool
-	pendingUntil   time.Time
+	id             uint32            // PipeWire registry global ID
+	proxy          uint32            // client-side proxy ID
+	class          Class             // stream/device media class
+	props          map[string]string // node properties from registry
+	params         map[uint32]uint32 // param ID → flags from last Node::info event
+	jack           bool              // true if JACK client without media class
+	meter          bool              // true if peak meter stream node
+	own            bool              // true if meter node owned by this instance
+	inPorts        int32             // count of input ports
+	outPorts       int32             // count of output ports
+	known          bool              // true once volumes, channels, and mute are populated
+	volumes        []float32         // current channel volumes (linear)
+	channels       []uint32          // channel map positions (e.g. FL, FR)
+	mute           bool              // true if node is muted
+	pendingVolumes []float32         // last volume set by client while pending
+	pendingMute    *bool             // last mute state set by client while pending
+	pendingUntil   time.Time         // deadline until client pending values win
 }
 
 type device struct {
-	id, proxy uint32
-	props     map[string]string
-	params    map[uint32]uint32
-
-	profiles []Profile // EnumProfile
-	profile  int32     // active profile index, -1 if none
-	routes   []routeInfo
-	active   []activeRoute
+	id       uint32            // PipeWire registry global ID
+	proxy    uint32            // client-side proxy ID
+	props    map[string]string // device properties from registry
+	params   map[uint32]uint32 // param ID → flags from last Device::info event
+	profiles []Profile         // available card profiles from EnumProfile
+	profile  int32             // active profile index, -1 if none
+	routes   []routeInfo       // available routes from EnumRoute
+	active   []activeRoute     // active card profile routes
 }
 
 // A routeInfo is an EnumRoute entry: a port the device can use.
 type routeInfo struct {
-	Route
-	direction uint32
-	devices   []int32 // card profile devices it applies to
-	profiles  []int32 // profiles it's available in
+	Route             // embedded public route metadata
+	direction uint32  // SPA_DIRECTION_INPUT (0) or SPA_DIRECTION_OUTPUT (1)
+	devices   []int32 // card profile devices this route applies to
+	profiles  []int32 // profiles this route is available in
 }
 
 // An activeRoute is a Route entry: the port a card profile device uses.
 type activeRoute struct {
-	index, device int32
+	index  int32 // route index on the device
+	device int32 // card profile device ID
 }
 
 // An enumReq collects the replies to one EnumParams.
 type enumReq struct {
-	seq           int32
-	proxy, global uint32
-	param         uint32
-	values        []pod
+	seq    int32  // sequence number of EnumParams request
+	proxy  uint32 // proxy ID targeted by the request
+	global uint32 // registry global ID of the object
+	param  uint32 // parameter ID being enumerated
+	values []pod  // collected reply pods
+}
+
+type portInfo struct {
+	id     uint32 // PipeWire registry global ID of the port
+	node   uint32 // node ID this port belongs to
+	portID int32  // port.id property identifying channel index
+	name   string // port.name property (e.g. "playback_FL")
+	out    bool   // true for output ports, false for input
+}
+
+// A jackMeter tracks a pipewire-pulse peak-detect stream for a JACK client.
+type jackMeter struct {
+	target   uint32        // target JACK node ID
+	node     uint32        // meter stream's PipeWire node ID (0 until announced)
+	ready    bool          // true once pipewire-pulse replied to stream creation
+	linked   int           // count of port pairs linked so far
+	unwanted []uint32      // default monitor link IDs queued for removal
+	done     chan struct{} // channel closed when links are established
+	syncSeq  int32         // sequence number of core sync awaiting completion
 }
 
 // A session is one connection to PipeWire and everything known through it.
 // All of its methods run on the client's loop goroutine.
 type session struct {
-	conn *conn
-	log  *log.Logger
-
-	ids      idMap
-	registry uint32
-	proxies  map[uint32]*proxy
-	nodes    map[uint32]*node
-	devices  map[uint32]*device
-	clients  map[uint32]map[string]string // global id → client props
-	meta     *proxy                       // the default metadata, nil if not bound
-	defaults map[string]string            // default metadata key → node name
-
-	seq   int32
-	enums map[int32]*enumReq   // by EnumParams seq
-	syncs map[int32][]*enumReq // by Sync seq, committed on its Done
-
-	gen, sentGen uint64 // registry generation received, and sent back
-
-	readySeq int32 // the initial Sync
-	ready    bool
-	dirty    bool
-	err      error // the first write error, which ends the session
+	conn        *conn                        // low-level PipeWire connection
+	log         *log.Logger                  // logger for protocol diagnostics
+	ids         idMap                        // allocator for client-side proxy IDs
+	registry    uint32                       // proxy ID of the PipeWire registry
+	proxies     map[uint32]*proxy            // proxy ID → proxy object
+	nodes       map[uint32]*node             // global ID → audio node
+	ports       map[uint32]portInfo          // global ID → audio port info
+	jackMeters  map[string]*jackMeter        // meter node name → JACK meter tracker
+	meters      map[uint32]*node             // global ID → meter stream nodes owned by this instance
+	meterPrefix string                       // prefix of meter stream nodes owned by this instance
+	devices     map[uint32]*device           // global ID → audio device/card
+	clients     map[uint32]map[string]string // global ID → client properties
+	meta        *proxy                       // default metadata proxy, nil if not bound
+	defaults    map[string]string            // default metadata key → node name
+	seq         int32                        // next request sequence number
+	enums       map[int32]*enumReq           // active EnumParams requests by sequence number
+	syncs       map[int32][]*enumReq         // queued EnumParams commits waiting for core sync
+	gen         uint64                       // registry generation received from server
+	sentGen     uint64                       // registry generation acknowledged back to server
+	readySeq    int32                        // sequence number of initial sync marking session ready
+	ready       bool                         // true once initial sync completes
+	dirty       bool                         // true if snapshot needs recomputing
+	err         error                        // first fatal error ending the session
 }
 
-func newSession(c *conn, logger *log.Logger) *session {
+func newSession(c *conn, logger *log.Logger, pid int) *session {
+	if pid == 0 {
+		pid = os.Getpid()
+	}
 	return &session{
-		conn:     c,
-		log:      logger,
-		ids:      idMap{next: idClient + 1},
-		proxies:  make(map[uint32]*proxy),
-		nodes:    make(map[uint32]*node),
-		devices:  make(map[uint32]*device),
-		clients:  make(map[uint32]map[string]string),
-		defaults: make(map[string]string),
-		enums:    make(map[int32]*enumReq),
-		syncs:    make(map[int32][]*enumReq),
+		conn:        c,
+		log:         logger,
+		ids:         idMap{next: idClient + 1},
+		proxies:     make(map[uint32]*proxy),
+		nodes:       make(map[uint32]*node),
+		ports:       make(map[uint32]portInfo),
+		jackMeters:  make(map[string]*jackMeter),
+		meters:      make(map[uint32]*node),
+		meterPrefix: fmt.Sprintf("%s%d.", MeterPrefix, pid),
+		devices:     make(map[uint32]*device),
+		clients:     make(map[uint32]map[string]string),
+		defaults:    make(map[string]string),
+		enums:       make(map[int32]*enumReq),
+		syncs:       make(map[int32][]*enumReq),
 	}
 }
 
@@ -314,6 +343,12 @@ func (s *session) coreEvent(op uint8, f *parser) error {
 				s.commit(r)
 			}
 		}
+		for _, jm := range s.jackMeters {
+			if jm.done != nil && jm.syncSeq == seq {
+				close(jm.done)
+				jm.done = nil
+			}
+		}
 		if seq == s.readySeq && !s.ready {
 			s.ready = true
 			s.dirty = true
@@ -353,9 +388,13 @@ func (s *session) removeProxy(id uint32) {
 	}
 	delete(s.proxies, id)
 	s.ids.release(id)
+	if p.kind == kindLink {
+		return
+	}
 	switch {
 	case p.kind == kindNode && s.nodes[p.global] != nil && s.nodes[p.global].proxy == id:
 		delete(s.nodes, p.global)
+		delete(s.meters, p.global)
 	case p.kind == kindDevice && s.devices[p.global] != nil && s.devices[p.global].proxy == id:
 		delete(s.devices, p.global)
 	case p.kind == kindMetadata && s.meta == p:
@@ -382,7 +421,25 @@ func (s *session) registryEvent(op uint8, f *parser) error {
 		if f.err != nil {
 			return f.err
 		}
+		if p, ok := s.ports[id]; ok {
+			delete(s.ports, id)
+			if n := s.nodes[p.node]; n != nil && n.jack {
+				s.dirty = true
+			}
+			return nil
+		}
 		delete(s.nodes, id)
+		delete(s.meters, id)
+		for name, jm := range s.jackMeters {
+			if jm.node == id {
+				if jm.done != nil {
+					close(jm.done)
+					jm.done = nil
+				}
+				delete(s.jackMeters, name)
+				break
+			}
+		}
 		delete(s.devices, id)
 		delete(s.clients, id)
 		if s.meta != nil && s.meta.global == id {
@@ -400,13 +457,71 @@ func (s *session) global(id uint32, typ string, version int32, props map[string]
 	case ifaceClient:
 		s.clients[id] = props
 	case ifaceNode:
+		name := props[propNodeName]
+		meter := strings.HasPrefix(name, MeterPrefix)
 		class, ok := mediaClasses[props[propMediaClass]]
 		jack := props[propMediaClass] == "" && props[propClientAPI] == "jack" && props[propMediaType] == "Audio"
-		if !ok && !jack {
+		if !ok && !jack && !meter {
 			return
 		}
+		own := strings.HasPrefix(name, s.meterPrefix)
 		p := s.bind(id, typ, min(version, versionNode), kindNode)
-		s.nodes[id] = &node{id: id, proxy: p.id, class: class, props: props, jack: jack}
+		n := &node{id: id, proxy: p.id, class: class, props: props, jack: jack, meter: meter, own: own}
+		s.nodes[id] = n
+		if meter {
+			if own {
+				s.meters[id] = n
+				if target, ok := parseJackMeterTarget(name); ok {
+					jm := s.ensureJackMeter(name, target)
+					jm.node = id
+					s.syncJackMeter(jm)
+				}
+			}
+			return
+		}
+	case ifacePort:
+		if props["port.monitor"] == "true" {
+			return
+		}
+		if dsp := props["format.dsp"]; dsp != "" && !strings.Contains(dsp, "audio") {
+			return
+		}
+		dir := props["port.direction"]
+		if dir != "in" && dir != "out" {
+			return
+		}
+		nodeID, err1 := strconv.ParseUint(props["node.id"], 10, 32)
+		portID, err2 := strconv.ParseInt(props["port.id"], 10, 32)
+		if err1 != nil || err2 != nil {
+			return
+		}
+		nid := uint32(nodeID)
+		s.ports[id] = portInfo{id: id, node: nid, portID: int32(portID), name: props["port.name"], out: dir == "out"}
+		if n := s.nodes[nid]; n != nil && n.jack {
+			s.dirty = true
+		}
+		for _, jm := range s.jackMeters {
+			if jm.node == nid || jm.target == nid {
+				s.syncJackMeter(jm)
+			}
+		}
+		return
+	case ifaceLink:
+		inNode, err1 := strconv.ParseUint(props["link.input.node"], 10, 32)
+		outNode, err2 := strconv.ParseUint(props["link.output.node"], 10, 32)
+		if err1 != nil || err2 != nil {
+			return
+		}
+		for _, jm := range s.jackMeters {
+			if jm.node == uint32(inNode) && uint32(outNode) != jm.target {
+				if jm.ready {
+					s.destroyLink(id)
+				} else {
+					jm.unwanted = append(jm.unwanted, id)
+				}
+			}
+		}
+		return
 	case ifaceDevice:
 		if props[propMediaClass] != mediaClassAudioDevice {
 			return
@@ -422,6 +537,104 @@ func (s *session) global(id uint32, typ string, version int32, props map[string]
 		return
 	}
 	s.dirty = true
+}
+
+func parseJackMeterTarget(name string) (uint32, bool) {
+	_, after, ok := strings.Cut(name, ".jack.")
+	if !ok {
+		return 0, false
+	}
+	idStr, _, _ := strings.Cut(after, ".")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	return uint32(id), err == nil
+}
+
+func (s *session) ensureJackMeter(name string, target uint32) *jackMeter {
+	jm := s.jackMeters[name]
+	if jm == nil {
+		jm = &jackMeter{target: target}
+		s.jackMeters[name] = jm
+	}
+	return jm
+}
+
+func (s *session) jackMeterReady(name string, done chan struct{}) {
+	target, ok := parseJackMeterTarget(name)
+	if !ok {
+		close(done)
+		return
+	}
+	jm := s.ensureJackMeter(name, target)
+	jm.ready = true
+	jm.done = done
+	s.syncJackMeter(jm)
+}
+
+func (s *session) syncJackMeter(jm *jackMeter) {
+	if !jm.ready || jm.node == 0 {
+		return
+	}
+	outPorts := s.nodePorts(jm.target, true)
+	inPorts := s.nodePorts(jm.node, false)
+	for jm.linked < len(outPorts) && jm.linked < len(inPorts) {
+		outPort := outPorts[jm.linked]
+		inPort := inPorts[jm.linked]
+		jm.linked++
+		pid := s.ids.alloc()
+		s.proxies[pid] = &proxy{id: pid, kind: kindLink}
+		s.send(idCore, coreCreateObject, func(b *builder) {
+			b.structure(func() {
+				b.string("link-factory")
+				b.string(ifaceLink)
+				b.int(versionLink)
+				b.dict([][2]string{
+					{"link.output.port", strconv.FormatUint(uint64(outPort.id), 10)},
+					{"link.input.port", strconv.FormatUint(uint64(inPort.id), 10)},
+				})
+				b.int(int32(pid))
+			})
+		})
+	}
+	for _, id := range jm.unwanted {
+		s.destroyLink(id)
+	}
+	jm.unwanted = nil
+	if jm.done != nil {
+		jm.syncSeq = s.sync()
+	}
+}
+
+func (s *session) destroyLink(id uint32) {
+	s.send(s.registry, registryDestroy, func(b *builder) {
+		b.structure(func() { b.int(int32(id)) })
+	})
+}
+
+func (s *session) resetMeterVolume(n *node) {
+	channels := max(1, len(n.volumes))
+	vols := make([]float32, channels)
+	for i := range vols {
+		vols[i] = 1.0
+	}
+	s.setProps(n, func(b *builder) {
+		b.prop(propChannelVolumes)
+		b.floatArray(vols)
+		b.prop(propMute)
+		b.bool(false)
+	})
+}
+
+func (s *session) nodePorts(nodeID uint32, out bool) []portInfo {
+	var ports []portInfo
+	for _, p := range s.ports {
+		if p.node == nodeID && p.out == out {
+			ports = append(ports, p)
+		}
+	}
+	slices.SortFunc(ports, func(a, b portInfo) int {
+		return cmp.Or(cmp.Compare(a.portID, b.portID), cmp.Compare(a.id, b.id))
+	})
+	return ports
 }
 
 func (s *session) bind(global uint32, typ string, version int32, kind proxyKind) *proxy {
@@ -466,7 +679,9 @@ func (s *session) nodeEvent(p *proxy, op uint8, f *parser) error {
 		}
 		if change&nodeChangeProps != 0 {
 			n.props = props
-			s.dirty = true
+			if !n.meter {
+				s.dirty = true
+			}
 		}
 		if change&nodeChangeParams != 0 {
 			s.enumerate(p, changedParams(n.params, params, paramProps))
@@ -610,6 +825,12 @@ func (s *session) commitProps(n *node, values []pod) {
 			n.mute = mute
 		}
 		n.known = true
+		if n.meter {
+			if n.own && (n.mute || slices.ContainsFunc(n.volumes, func(v float32) bool { return v != 1.0 })) {
+				s.resetMeterVolume(n)
+			}
+			return
+		}
 		s.dirty = true
 		return
 	}
@@ -941,7 +1162,7 @@ func (s *session) snapshot(now time.Time) *Snapshot {
 	snap := &Snapshot{Connected: true}
 	for _, id := range slices.Sorted(maps.Keys(s.nodes)) {
 		n := s.nodes[id]
-		if n.props[propStreamMonitor] == "true" {
+		if n.meter || n.props[propStreamMonitor] == "true" {
 			continue
 		}
 		if !n.jack {
@@ -955,6 +1176,12 @@ func (s *session) snapshot(now time.Time) *Snapshot {
 			if c.ports > 0 {
 				v := s.nodeView(n, now)
 				v.Class, v.JACK = c.class, true
+				if c.class == Playback {
+					for i, p := range s.nodePorts(n.id, true) {
+						name := cmp.Or(p.name, "CH"+strconv.Itoa(i+1))
+						v.Channels = append(v.Channels, Channel{Name: name, Volume: 1})
+					}
+				}
 				snap.Nodes = append(snap.Nodes, v)
 			}
 		}
@@ -1048,8 +1275,8 @@ func cardView(d *device) Card {
 // freed by Core::RemoveId is reused first, last freed first, else the
 // next new one.
 type idMap struct {
-	next uint32
-	free []uint32
+	next uint32   // next unallocated proxy ID
+	free []uint32 // pool of released proxy IDs available for reuse
 }
 
 func (m *idMap) alloc() uint32 {

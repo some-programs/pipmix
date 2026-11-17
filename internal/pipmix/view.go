@@ -518,15 +518,18 @@ func (m *mixer) channelLine(it item, i int, focused bool) string {
 
 	var c pw.Channel
 	var nameStr string
-	if i < 0 {
+	if i < 0 && len(n.Channels) > 1 {
 		c = n.Channels[0]
 		nameStr = foldedName(n.Channels)
 	} else {
-		c = n.Channels[i]
-		nameStr = c.Name
+		c = n.Channels[max(i, 0)]
+		nameStr = ansi.Truncate(c.Name, labelWidth, "…")
 	}
-	name := fmt.Sprintf("%*s", labelWidth, nameStr)
-	vol := fmt.Sprintf("%3d", percent(c.Volume))
+	name := strings.Repeat(" ", max(0, labelWidth-ansi.StringWidth(nameStr))) + nameStr
+	vol := "   "
+	if !n.JACK {
+		vol = fmt.Sprintf("%3d", percent(c.Volume))
+	}
 	if chanFocused {
 		name = boldStyle.Render(name)
 		vol = boldStyle.Render(vol)
@@ -575,6 +578,9 @@ func (m *mixer) channelLine(it item, i int, focused bool) string {
 	}
 
 	label := prefix + name + " " + vol + " "
+	if n.JACK {
+		return label + meterBar(m.level(it, i), m.peak(it, i), m.barWidth(), m.opts.limit, m.look())
+	}
 	return label + bar(c.Volume, m.level(it, i), m.peak(it, i), m.barWidth(), m.opts.limit, n.Mute, m.look())
 }
 
@@ -586,6 +592,59 @@ const (
 
 func fixedBar(width int) string {
 	return strings.Repeat(" ", barX-contentX) + dimStyle.Render(strings.Repeat(faderEmpty, max(width, 0)))
+}
+
+// meterBar renders a level meter of width cells without a volume fader.
+func meterBar(level, peak float64, width int, limit float64, look meterLook) string {
+	if width <= 0 {
+		return ""
+	}
+	lit, pk := 0, 0
+	if look != meterOff {
+		if level > 0 {
+			lit = knobCell(level, limit, width)
+		}
+		if peak > 0 {
+			pk = knobCell(peak, limit, width)
+		}
+	}
+	if lit == 0 && pk == 0 {
+		return dimStyle.Render(strings.Repeat(faderEmpty, width))
+	}
+	hundred := knobCell(1, limit, width)
+	styles := [...]lipgloss.Style{barFullStyle, barOverStyle, brightFull, brightOver, dimStyle}
+	type cell struct {
+		glyph string
+		style int
+	}
+	cells := make([]cell, width)
+	for i := range cells {
+		over := 0
+		if i > hundred {
+			over = 1
+		}
+		c := cell{faderEmpty, 4}
+		switch {
+		case i < lit && (look == meterSolid || look == meterShade):
+			c = cell{faderKnob, over}
+		case i == lit-1 && look == meterDot:
+			c = cell{faderKnob, 2 + over}
+		}
+		if i == pk-1 {
+			c = cell{faderKnob, 2 + over}
+		}
+		cells[i] = c
+	}
+	var b strings.Builder
+	for i := 0; i < len(cells); {
+		j := i + 1
+		for j < len(cells) && cells[j] == cells[i] {
+			j++
+		}
+		b.WriteString(styles[cells[i].style].Render(strings.Repeat(cells[i].glyph, j-i)))
+		i = j
+	}
+	return b.String()
 }
 
 var (

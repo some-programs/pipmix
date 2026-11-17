@@ -5,6 +5,8 @@ import "strconv"
 // Interface types, as announced by Registry::Global.
 const (
 	ifaceNode     = "PipeWire:Interface:Node"
+	ifacePort     = "PipeWire:Interface:Port"
+	ifaceLink     = "PipeWire:Interface:Link"
 	ifaceDevice   = "PipeWire:Interface:Device"
 	ifaceMetadata = "PipeWire:Interface:Metadata"
 	ifaceClient   = "PipeWire:Interface:Client"
@@ -15,9 +17,14 @@ const (
 	versionCore     = 4
 	versionRegistry = 3
 	versionNode     = 3
+	versionLink     = 3
 	versionDevice   = 3
 	versionMetadata = 3
 )
+
+// MeterPrefix prefixes the node.name of peak-detect streams created for
+// sinks, sources, streams, and JACK clients.
+const MeterPrefix = "pipmix.meter."
 
 // Fixed proxy ids.
 const (
@@ -27,10 +34,12 @@ const (
 
 // Core methods and events.
 const (
-	coreHello       = 1
-	coreSync        = 2
-	corePong        = 3
-	coreGetRegistry = 5
+	coreHello        = 1
+	coreSync         = 2
+	corePong         = 3
+	coreGetRegistry  = 5
+	coreCreateObject = 6
+	coreDestroy      = 7
 
 	coreEventInfo     = 0
 	coreEventDone     = 1
@@ -42,7 +51,8 @@ const (
 const clientUpdateProperties = 2
 
 const (
-	registryBind = 1
+	registryBind    = 1
+	registryDestroy = 2
 
 	registryEventGlobal       = 0
 	registryEventGlobalRemove = 1
@@ -62,7 +72,7 @@ const (
 	metadataEventProperty = 0
 )
 
-// Info change mask bits.
+// Node::info and Device::info change mask bits.
 const (
 	nodeChangeProps   = 1 << 3
 	nodeChangeParams  = 1 << 4

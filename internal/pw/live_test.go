@@ -2,11 +2,14 @@ package pw
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -36,6 +39,8 @@ context.objects = [
         media.class = Stream/Output/Audio audio.position = [ FL FR ] } }
     { factory = spa-node-factory args = { factory.name = support.null-audio-sink node.name = test-jack
         node.description = "Test JACK" client.api = jack media.type = Audio audio.position = [ MONO ] } }
+    { factory = adapter args = { factory.name = support.null-audio-sink node.name = pipmix.meter.%d.sink.1
+        node.description = "Test Meter Sink" media.class = Stream/Input/Audio audio.position = [ FL FR ] } }
 ]
 `
 
@@ -52,7 +57,7 @@ func startPipeWire(t *testing.T) (stop func()) {
 	}
 	dir := t.TempDir()
 	conf := filepath.Join(dir, "test.conf")
-	if err := os.WriteFile(conf, []byte(testConf), 0o600); err != nil {
+	if err := os.WriteFile(conf, []byte(fmt.Sprintf(testConf, os.Getpid())), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PIPEWIRE_RUNTIME_DIR", dir)
@@ -178,6 +183,63 @@ func TestLive(t *testing.T) {
 	waitFor(t, c, "default", func(s *Snapshot) bool {
 		n := findNode(s, "test-sink")
 		return n != nil && n.Default
+	})
+
+	meterNodeName := fmt.Sprintf("pipmix.meter.%d.sink.1", os.Getpid())
+	if findNode(s, meterNodeName) != nil {
+		t.Errorf("meter node should not be in snapshot")
+	}
+	var meterGlobalID uint32
+	meterChecked := make(chan bool, 1)
+	c.do(func(sess *session) {
+		for id := range sess.meters {
+			meterGlobalID = id
+		}
+		meterChecked <- len(sess.meters) == 1
+	})
+	select {
+	case ok := <-meterChecked:
+		if !ok {
+			t.Errorf("expected 1 meter node in session")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for session command")
+	}
+
+	// External tool alters meter volume / mute; pipmix resets them to 100% unmuted.
+	cmd := exec.Command("pw-cli", "s", strconv.FormatUint(uint64(meterGlobalID), 10), "Props", `{ "channelVolumes": [ 0.3, 0.3 ], "mute": true }`)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("pw-cli set-param failed: %v: %s", err, out)
+	}
+
+	// Verify the meter node is reset to volume 1.0 and unmuted.
+	deadline := time.After(3 * time.Second)
+	for {
+		out, err := exec.Command("pw-cli", "e", strconv.FormatUint(uint64(meterGlobalID), 10), "Props").CombinedOutput()
+		sout := string(out)
+		if err == nil && strings.Contains(sout, "Bool false") && (strings.Contains(sout, "1.000000") || strings.Contains(sout, "1,000000")) {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for meter node volume reset; last props: %s", out)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	// A client from another instance (with another PID) hides foreign meter
+	// streams from its snapshot, and does not track or enforce volume on them.
+	cOther := NewClient(log.New(testWriter{t}, "other: ", 0))
+	cOther.PID = 99999
+	go cOther.Run(ctx)
+	sOther := waitFor(t, cOther, "other client", func(s *Snapshot) bool { return findNode(s, "test-sink") != nil })
+	if findNode(sOther, meterNodeName) != nil {
+		t.Errorf("other instance should hide foreign meter node from snapshot")
+	}
+	cOther.do(func(sess *session) {
+		if len(sess.meters) != 0 {
+			t.Errorf("other instance should not track foreign meter node, got %d", len(sess.meters))
+		}
 	})
 }
 

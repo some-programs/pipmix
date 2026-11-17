@@ -151,8 +151,10 @@ func newMixer(c *pw.Client, media *mpris.Watcher, meter *pulse.Meter, quitKeys s
 	}
 }
 
-type snapshotMsg struct{}
-type mediaMsg struct{}
+type (
+	snapshotMsg struct{}
+	mediaMsg    struct{}
+)
 
 type noticeMsg struct {
 	text string
