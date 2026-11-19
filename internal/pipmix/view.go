@@ -277,6 +277,12 @@ func (m *mixer) renderItem(it item, focused bool, layout tabLayout) []string {
 	inner := m.innerWidth()
 	gutter := " " + typeStrip(it)
 	line := func(s string) string { return gutter + " " + fit(s, inner) + "  " }
+	cLine := func(s string) string {
+		if m.barWidth() > 0 {
+			return gutter + " " + s + "  "
+		}
+		return line(s)
+	}
 	var lines []string
 	for _, l := range m.itemLines(it) {
 		switch l.kind {
@@ -286,10 +292,10 @@ func (m *mixer) renderItem(it item, focused bool, layout tabLayout) []string {
 			groupFocused := focused || layout.isGroupFocused(it)
 			lines = append(lines, line(m.titleLine(it, groupFocused, inner, layout)))
 		case lineChannel:
-			lines = append(lines, line(m.channelLine(it, l.channel, focused)))
+			lines = append(lines, cLine(m.channelLine(it, l.channel, focused)))
 		case lineNoVolume:
 			if it.node.JACK {
-				lines = append(lines, line(fixedBar(m.barWidth())))
+				lines = append(lines, cLine(fixedBar(m.barWidth())))
 				break
 			}
 			lines = append(lines, line(dimStyle.Render("volume not known yet")))
