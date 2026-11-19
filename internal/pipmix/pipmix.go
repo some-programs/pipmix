@@ -143,14 +143,16 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.mixer.setSize(msg.Width, msg.Height)
+		a.mixer.watchMeters()
 	case tea.KeyPressMsg:
 		cmd = a.mixer.handleKey(msg.String())
+		a.mixer.watchMeters()
 	case tea.MouseMsg:
 		cmd = a.mixer.handleMouse(msg)
+		a.mixer.watchMeters()
 	default:
 		cmd = a.mixer.update(msg)
 	}
-	a.mixer.watchMeters()
 	return a, cmd
 }
 
