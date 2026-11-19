@@ -532,8 +532,9 @@ func TestTypeStrip(t *testing.T) {
 				continue
 			}
 			found = true
+			layout := m.tabLayout(tc.tab)
 			for _, focused := range []bool{false, true} {
-				lines := m.renderItem(it, focused)
+				lines := m.renderItem(it, focused, layout)
 				if strings.Contains(lines[0], focusTitleStyle.Render(it.title())) != focused {
 					t.Errorf("tab %s, item %d, focused %v: title line %q, want the name bold and underlined only when focused", tabNames[tc.tab], tc.id, focused, lines[0])
 				}
