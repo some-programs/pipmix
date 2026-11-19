@@ -113,6 +113,7 @@ type mixer struct {
 	dotHold      map[uint32][]time.Time
 	levelsAt     time.Time
 	ticking      bool
+	meterWaiting bool // a waitMeter command is pending
 	blurred      bool
 	smoothing    int
 	metersHidden bool
@@ -148,6 +149,8 @@ func newMixer(c *pw.Client, media *mpris.Watcher, meter *pulse.Meter, quitKeys s
 		client: c, snap: c.Snapshot(), media: media, meter: meter, quitKeys: quitKeys, opts: opts,
 		tab: opts.tab, meterMode: opts.meterMode, smoothing: opts.smoothing,
 		unlocked: make(map[string]bool),
+		// init starts the first wait, on a copy of the mixer.
+		meterWaiting: meter != nil,
 	}
 }
 
@@ -186,7 +189,7 @@ func (m *mixer) waitMedia() tea.Cmd {
 	}
 }
 
-func (m *mixer) init() tea.Cmd { return tea.Batch(m.waitSnapshot(), m.waitMedia(), m.waitMeter()) }
+func (m *mixer) init() tea.Cmd { return tea.Batch(m.waitSnapshot(), m.waitMedia(), m.nextMeter()) }
 
 // findMedia matches playback streams to MPRIS players by process ID.
 func (m *mixer) findMedia() {
@@ -241,14 +244,16 @@ func (m *mixer) update(msg tea.Msg) tea.Cmd {
 		m.findMedia()
 		return m.waitMedia()
 	case meterMsg:
-		return tea.Batch(m.updateLevels(), m.waitMeter())
+		m.meterWaiting = false
+		return m.startMetering()
 	case meterTickMsg:
-		m.ticking = false
-		return m.updateLevels()
+		return m.tickMetering()
 	case tea.FocusMsg:
 		m.blurred = false
+		return m.startMetering()
 	case tea.BlurMsg:
 		m.blurred = true
+		return m.startMetering()
 	case noticeMsg:
 		m.notice, m.noticeErr = msg.text, msg.err
 		m.noticeSeq++

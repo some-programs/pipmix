@@ -284,3 +284,25 @@ func TestMeterFadeIn(t *testing.T) {
 		t.Errorf("restarted meter's level %v, want 0", l)
 	}
 }
+
+// TestMeterWaitOnce checks that a meter wait is never started while one is
+// pending.
+func TestMeterWaitOnce(t *testing.T) {
+	m := testMixer()
+	m.snap = meterSnapshot()
+	m.meter = pulse.NewMeter(nil, 0)
+	m.meterWaiting = true // as after init
+
+	for _, msg := range []tea.Msg{tea.BlurMsg{}, tea.FocusMsg{}} {
+		if cmd := m.update(msg); cmd != nil {
+			t.Errorf("%T with a wait pending: got a command, want none", msg)
+		}
+	}
+	// A snapshot with nothing moving waits again, once.
+	if cmd := m.update(meterMsg{}); cmd == nil || !m.meterWaiting {
+		t.Fatal("snapshot with settled levels: no new wait")
+	}
+	if cmd := m.update(tea.FocusMsg{}); cmd != nil {
+		t.Error("focus after the new wait: got a command, want none")
+	}
+}

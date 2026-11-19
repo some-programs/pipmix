@@ -57,7 +57,17 @@ type (
 	meterTickMsg struct{}
 )
 
+// waitMeter waits for the next meter snapshot, unless a wait is already
+// pending.
 func (m *mixer) waitMeter() tea.Cmd {
+	if m.meter == nil || m.meterWaiting {
+		return nil
+	}
+	m.meterWaiting = true
+	return m.nextMeter()
+}
+
+func (m *mixer) nextMeter() tea.Cmd {
 	if m.meter == nil {
 		return nil
 	}
@@ -137,15 +147,30 @@ func (m *mixer) watchMeters() {
 	m.meter.Watch(targets)
 }
 
-func (m *mixer) updateLevels() tea.Cmd {
+func (m *mixer) startMetering() tea.Cmd {
+	if m.ticking {
+		return nil
+	}
 	snap := &pulse.Snapshot{}
 	if m.meter != nil {
 		snap = m.meter.Snapshot()
 	}
-	if !m.setLevels(snap, time.Now()) || m.ticking {
-		return nil
+	if !m.setLevels(snap, time.Now()) {
+		return m.waitMeter()
 	}
 	m.ticking = true
+	return tea.Tick(time.Second/time.Duration(m.opts.fps), func(time.Time) tea.Msg { return meterTickMsg{} })
+}
+
+func (m *mixer) tickMetering() tea.Cmd {
+	snap := &pulse.Snapshot{}
+	if m.meter != nil {
+		snap = m.meter.Snapshot()
+	}
+	if !m.setLevels(snap, time.Now()) {
+		m.ticking = false
+		return m.waitMeter()
+	}
 	return tea.Tick(time.Second/time.Duration(m.opts.fps), func(time.Time) tea.Msg { return meterTickMsg{} })
 }
 
