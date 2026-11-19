@@ -168,12 +168,11 @@ func (m *mixer) view() string {
 	if m.help {
 		list = m.helpView(m.width, h)
 	} else {
-		items := m.items(m.tab)
-		fi := m.focusIndex(m.tab, items)
-		for i, it := range items {
-			list = append(list, m.renderItem(it, i == fi)...)
+		layout := m.tabLayout(m.tab)
+		for i, it := range layout.items {
+			list = append(list, m.renderItem(it, i == layout.focus, layout)...)
 		}
-		if len(items) == 0 && m.snap.Connected {
+		if len(layout.items) == 0 && m.snap.Connected {
 			list = []string{dimStyle.Render(" Nothing here")}
 		}
 		off := min(m.offset[m.tab], max(len(list)-h, 0))
@@ -234,7 +233,43 @@ func (m *mixer) statusLine() string {
 	return ""
 }
 
-func (m *mixer) renderItem(it item, focused bool) []string {
+type tabLayout struct {
+	items     []item
+	focus     int
+	portWidth int
+}
+
+func (m *mixer) tabLayout(t tab) tabLayout {
+	items := m.items(t)
+	return tabLayout{
+		items:     items,
+		focus:     m.focusIndex(t, items),
+		portWidth: m.portWidth(items),
+	}
+}
+
+func (l tabLayout) isGroupMuted(it item) bool {
+	if it.groupCount <= 1 {
+		return it.node != nil && it.node.Mute
+	}
+	for _, other := range l.items {
+		if other.groupKey == it.groupKey && other.node != nil {
+			if !other.node.Mute {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (l tabLayout) isGroupFocused(it item) bool {
+	if it.groupCount <= 1 || it.groupKey == "" || l.focus < 0 || l.focus >= len(l.items) {
+		return false
+	}
+	return l.items[l.focus].groupKey == it.groupKey
+}
+
+func (m *mixer) renderItem(it item, focused bool, layout tabLayout) []string {
 	w := m.width
 	if w < contentX+2 {
 		return nil
@@ -248,8 +283,8 @@ func (m *mixer) renderItem(it item, focused bool) []string {
 		case lineBlank:
 			lines = append(lines, "")
 		case lineTitle:
-			groupFocused := focused || m.isGroupFocused(it)
-			lines = append(lines, line(m.titleLine(it, groupFocused, inner)))
+			groupFocused := focused || layout.isGroupFocused(it)
+			lines = append(lines, line(m.titleLine(it, groupFocused, inner, layout)))
 		case lineChannel:
 			lines = append(lines, line(m.channelLine(it, l.channel, focused)))
 		case lineNoVolume:
@@ -301,20 +336,28 @@ func (m *mixer) tagsWidth() int {
 	return 0
 }
 
+func (m *mixer) portWidth(items []item) int {
+	if m.tab == tabCards {
+		return 0
+	}
+	port := 0
+	for _, it := range items {
+		port = max(port, ansi.StringWidth(portText(it)))
+	}
+	return port
+}
+
 // titleColumns returns the widths of the title and port columns for the
 // current tab.
-func (m *mixer) titleColumns(width int) (title, port int) {
+func (m *mixer) titleColumns(width, portW int) (title, port int) {
 	if m.tab == tabCards {
 		return width, 0
-	}
-	for _, it := range m.items(m.tab) {
-		port = max(port, ansi.StringWidth(portText(it)))
 	}
 	rest := width
 	if tw := m.tagsWidth(); tw > 0 {
 		rest -= tw + 1
 	}
-	port = min(port, rest-1-min(minTitle, rest/2))
+	port = min(portW, rest-1-min(minTitle, rest/2))
 	if port < minPortRoom {
 		port = 0
 	}
@@ -347,40 +390,14 @@ func tagsText(it item) string {
 
 const toolbarWidth = barX - contentX
 
-func (m *mixer) isGroupMuted(it item) bool {
-	if it.groupCount <= 1 {
-		return it.node != nil && it.node.Mute
-	}
-	for _, other := range m.items(m.tab) {
-		if other.groupKey == it.groupKey && other.node != nil {
-			if !other.node.Mute {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func (m *mixer) isGroupFocused(it item) bool {
-	if it.groupCount <= 1 || it.groupKey == "" {
-		return false
-	}
-	items := m.items(m.tab)
-	fi := m.focusIndex(m.tab, items)
-	if fi < 0 || fi >= len(items) {
-		return false
-	}
-	return items[fi].groupKey == it.groupKey
-}
-
-func (m *mixer) toolbar(it item, focused bool) string {
+func (m *mixer) toolbar(it item, focused bool, layout tabLayout) string {
 	if it.node == nil {
 		return ""
 	}
 	var b strings.Builder
 	muted := it.node.Mute
 	if it.groupCount > 1 {
-		muted = m.isGroupMuted(it)
+		muted = layout.isGroupMuted(it)
 	}
 	b.WriteString(muteSymbol(muted, it.node.JACK, focused))
 	if btn := playButton(it, focused); btn != "" {
@@ -394,7 +411,7 @@ func (m *mixer) toolbar(it item, focused bool) string {
 	return b.String()
 }
 
-func (m *mixer) titleLine(it item, focused bool, width int) string {
+func (m *mixer) titleLine(it item, focused bool, width int, layout tabLayout) string {
 	title := it.title()
 	if it.groupCount > 1 && it.groupTitle != "" {
 		title = it.groupTitle
@@ -402,7 +419,7 @@ func (m *mixer) titleLine(it item, focused bool, width int) string {
 	if focused {
 		title = focusTitleStyle.Render(title)
 	}
-	tb := m.toolbar(it, focused)
+	tb := m.toolbar(it, focused, layout)
 	avail := width
 	if it.node != nil {
 		avail = max(0, width-toolbarWidth)
@@ -412,17 +429,17 @@ func (m *mixer) titleLine(it item, focused bool, width int) string {
 	}
 	tw := 0
 	titleW := avail
-	portW := 0
+	finalPortW := 0
 	if it.node.Class == pw.Sink || it.node.Class == pw.Source {
 		tw = m.tagsWidth()
 		if avail < tw+2 {
 			return tb + title
 		}
-		titleW, portW = m.titleColumns(avail)
+		titleW, finalPortW = m.titleColumns(avail, layout.portWidth)
 	}
 	line := tb + fit(title, titleW)
-	if portW > 0 {
-		line += " " + dimStyle.Render(fit(portText(it), portW))
+	if finalPortW > 0 {
+		line += " " + dimStyle.Render(fit(portText(it), finalPortW))
 	}
 	if tw > 0 {
 		line += " " + tagsText(it)
@@ -439,7 +456,7 @@ func (m *mixer) portSpan(it item) (start, end int, ok bool) {
 		return 0, 0, false
 	}
 	avail := max(0, inner-toolbarWidth)
-	titleW, portW := m.titleColumns(avail)
+	titleW, portW := m.titleColumns(avail, m.portWidth(m.items(m.tab)))
 	if portW == 0 {
 		return 0, 0, false
 	}
