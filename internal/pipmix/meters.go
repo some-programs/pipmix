@@ -3,6 +3,7 @@ package pipmix
 import (
 	"maps"
 	"math"
+	"slices"
 	"strconv"
 	"time"
 
@@ -160,97 +161,110 @@ func (m *mixer) setLevels(snap *pulse.Snapshot, now time.Time) (moving bool) {
 	sm := smoothings[m.smoothing]
 	attack := 1 - math.Exp(-dt/sm.attack.Seconds())
 	release := 1 - math.Exp(-dt/sm.release.Seconds())
+	var buf [32]float64
 
-	fill := make(map[uint32][]float64)
-	for id, target := range m.shown(source) {
-		prev := m.fill[id]
-		v := make([]float64, len(target))
+	shown := func(id uint32) bool { return m.meterNode(id, source[id]) != nil }
+	m.fill, m.fillStart = prune(m.fill, shown), prune(m.fillStart, shown)
+	for id, raw := range source {
+		n := m.meterNode(id, raw)
+		if n == nil {
+			continue
+		}
+		start, ok := m.fillStart[id]
+		if !ok {
+			start = now
+			m.fillStart[id] = start
+		}
+		if now.Sub(start) < fadeIn {
+			moving = true
+		}
+		target, v := scale(n, raw, buf[:0]), m.fill[id]
+		if len(v) != len(target) {
+			m.fill[id] = slices.Clone(target)
+			continue
+		}
 		for ch, t := range target {
-			if ch >= len(prev) {
-				v[ch] = t
-				continue
-			}
 			k := release
-			if t > prev[ch] {
+			if t > v[ch] {
 				k = attack
 			}
-			v[ch] = prev[ch] + k*(t-prev[ch])
+			v[ch] += k * (t - v[ch])
 			if math.Abs(t-v[ch]) < settled {
 				v[ch] = t
 			} else {
 				moving = true
 			}
 		}
-		fill[id] = v
 	}
-	m.fill = fill
 
-	starts := make(map[uint32]time.Time)
-	for id := range fill {
-		start, ok := m.fillStart[id]
-		if !ok {
-			start = now
+	shown = func(id uint32) bool { return m.meterNode(id, snap.Peaks[id]) != nil }
+	m.dot, m.dotHold = prune(m.dot, shown), prune(m.dotHold, shown)
+	for id, raw := range snap.Peaks {
+		n := m.meterNode(id, raw)
+		if n == nil {
+			continue
 		}
-		starts[id] = start
-		if now.Sub(start) < fadeIn {
-			moving = true
+		target, v, hold := scale(n, raw, buf[:0]), m.dot[id], m.dotHold[id]
+		if len(v) != len(target) || len(hold) != len(target) {
+			// Zero rises to the target and holds it.
+			v, hold = make([]float64, len(target)), make([]time.Time, len(target))
+			m.dot[id], m.dotHold[id] = v, hold
 		}
-	}
-	m.fillStart = starts
-
-	dot := make(map[uint32][]float64)
-	holds := make(map[uint32][]time.Time)
-	for id, target := range m.shown(snap.Peaks) {
-		prev, prevHold := m.dot[id], m.dotHold[id]
-		v := make([]float64, len(target))
-		hold := make([]time.Time, len(target))
 		for ch, t := range target {
 			switch {
-			case ch >= len(prev) || ch >= len(prevHold) || t >= prev[ch]:
+			case t >= v[ch]:
 				v[ch], hold[ch] = t, now.Add(m.opts.peakHold)
-			case now.Before(prevHold[ch]):
-				v[ch], hold[ch] = prev[ch], prevHold[ch]
+			case now.Before(hold[ch]):
+				// Hold the peak.
 			default:
-				v[ch], hold[ch] = max(t, prev[ch]-m.opts.limit*dt), prevHold[ch]
+				v[ch] = max(t, v[ch]-m.opts.limit*dt)
 			}
 			if v[ch] > t {
 				moving = true
 			}
 		}
-		dot[id], holds[id] = v, hold
 	}
-	m.dot, m.dotHold = dot, holds
 	return moving
 }
 
-// shown scales raw levels to the cubic volume scale, applying sink volume and
-// mute state.
-func (m *mixer) shown(raw map[uint32][]float64) map[uint32][]float64 {
-	nodes := make(map[uint32]*pw.Node)
+// meterNode returns the node that raw levels for id belong to, or nil if
+// they are not shown.
+func (m *mixer) meterNode(id uint32, raw []float64) *pw.Node {
 	for i := range m.snap.Nodes {
-		if len(m.snap.Nodes[i].Channels) > 0 {
-			nodes[m.snap.Nodes[i].ID] = &m.snap.Nodes[i]
+		if n := &m.snap.Nodes[i]; n.ID == id && len(n.Channels) > 0 {
+			if len(raw) != len(n.Channels) {
+				return nil
+			}
+			return n
 		}
 	}
-	shown := make(map[uint32][]float64)
-	for id, levels := range raw {
-		n := nodes[id]
-		if n == nil || len(levels) != len(n.Channels) {
-			continue
+	return nil
+}
+
+// scale appends raw levels of n to dst on the cubic volume scale, applying
+// sink volume and mute state.
+func scale(n *pw.Node, raw, dst []float64) []float64 {
+	for ch, l := range raw {
+		v := math.Cbrt(l)
+		if n.Class == pw.Sink {
+			v *= n.Channels[ch].Volume
 		}
-		v := make([]float64, len(levels))
-		for ch, l := range levels {
-			v[ch] = math.Cbrt(l)
-			if n.Class == pw.Sink {
-				v[ch] *= n.Channels[ch].Volume
-			}
-			if n.Mute {
-				v[ch] = 0
-			}
+		if n.Mute {
+			v = 0
 		}
-		shown[id] = v
+		dst = append(dst, v)
 	}
-	return shown
+	return dst
+}
+
+// prune deletes the entries of levels whose id is not kept, making levels
+// if it is nil.
+func prune[V any](levels map[uint32]V, keep func(id uint32) bool) map[uint32]V {
+	if levels == nil {
+		return make(map[uint32]V)
+	}
+	maps.DeleteFunc(levels, func(id uint32, _ V) bool { return !keep(id) })
+	return levels
 }
 
 func (m *mixer) level(it item, ch int) float64 {
