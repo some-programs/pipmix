@@ -239,9 +239,11 @@ func (m *mixer) update(msg tea.Msg) tea.Cmd {
 		m.snap = m.client.Snapshot()
 		m.findMedia()
 		m.refocus()
+		m.watchMeters()
 		return m.waitSnapshot()
 	case mediaMsg:
 		m.findMedia()
+		m.watchMeters()
 		return m.waitMedia()
 	case meterMsg:
 		m.meterWaiting = false
@@ -250,9 +252,11 @@ func (m *mixer) update(msg tea.Msg) tea.Cmd {
 		return m.tickMetering()
 	case tea.FocusMsg:
 		m.blurred = false
+		m.watchMeters()
 		return m.startMetering()
 	case tea.BlurMsg:
 		m.blurred = true
+		m.watchMeters()
 		return m.startMetering()
 	case noticeMsg:
 		m.notice, m.noticeErr = msg.text, msg.err
