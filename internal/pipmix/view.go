@@ -613,29 +613,32 @@ func meterBar(level, peak float64, width int, limit float64, look meterLook) str
 	}
 	hundred := knobCell(1, limit, width)
 	styles := [...]lipgloss.Style{barFullStyle, barOverStyle, brightFull, brightOver, dimStyle}
-	type cell struct {
-		glyph string
-		style int
+	var cellBuf [256]barCell
+	var cells []barCell
+	if width <= len(cellBuf) {
+		cells = cellBuf[:width]
+	} else {
+		cells = make([]barCell, width)
 	}
-	cells := make([]cell, width)
 	for i := range cells {
 		over := 0
 		if i > hundred {
 			over = 1
 		}
-		c := cell{faderEmpty, 4}
+		c := barCell{faderEmpty, 4}
 		switch {
 		case i < lit && (look == meterSolid || look == meterShade):
-			c = cell{faderKnob, over}
+			c = barCell{faderKnob, over}
 		case i == lit-1 && look == meterDot:
-			c = cell{faderKnob, 2 + over}
+			c = barCell{faderKnob, 2 + over}
 		}
 		if i == pk-1 {
-			c = cell{faderKnob, 2 + over}
+			c = barCell{faderKnob, 2 + over}
 		}
 		cells[i] = c
 	}
 	var b strings.Builder
+	b.Grow(width * 6)
 	for i := 0; i < len(cells); {
 		j := i + 1
 		for j < len(cells) && cells[j] == cells[i] {
@@ -645,6 +648,11 @@ func meterBar(level, peak float64, width int, limit float64, look meterLook) str
 		i = j
 	}
 	return b.String()
+}
+
+type barCell struct {
+	glyph string
+	style int
 }
 
 var (
@@ -661,6 +669,7 @@ func bar(v, level, peak float64, width int, limit float64, muted bool, look mete
 	knob := knobCell(v, limit, width)
 	hundred := knobCell(1, limit, width)
 	var b strings.Builder
+	b.Grow(width * 6)
 	run := func(s string, from, to int, style lipgloss.Style) {
 		if to > from {
 			b.WriteString(style.Render(strings.Repeat(s, to-from)))
@@ -677,10 +686,6 @@ func bar(v, level, peak float64, width int, limit float64, muted bool, look mete
 		knobStyle = barOverStyle
 	}
 	styles := [...]lipgloss.Style{barFullStyle, barOverStyle, brightFull, brightOver}
-	type cell struct {
-		glyph string
-		style int
-	}
 	lit, pk := 0, 0
 	if look != meterOff {
 		if level > 0 {
@@ -690,23 +695,29 @@ func bar(v, level, peak float64, width int, limit float64, muted bool, look mete
 			pk = min(knobCell(peak, limit, width), knob)
 		}
 	}
-	cells := make([]cell, knob)
+	var cellBuf [256]barCell
+	var cells []barCell
+	if knob <= len(cellBuf) {
+		cells = cellBuf[:knob]
+	} else {
+		cells = make([]barCell, knob)
+	}
 	for i := range cells {
 		over := 0
 		if i > hundred {
 			over = 1
 		}
-		c := cell{faderFull, over}
+		c := barCell{faderFull, over}
 		switch {
 		case i < lit && (look == meterSolid || look == meterShade):
 			c.glyph = faderKnob
 		case i == lit-1 && look == meterDot:
-			c = cell{faderKnob, 2 + over}
+			c = barCell{faderKnob, 2 + over}
 		case look == meterShade:
 			c.glyph = "▒"
 		}
 		if i == pk-1 {
-			c = cell{faderKnob, 2 + over}
+			c = barCell{faderKnob, 2 + over}
 		}
 		cells[i] = c
 	}
