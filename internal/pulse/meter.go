@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"maps"
 	"math"
 	"net"
 	"os"
@@ -141,21 +140,40 @@ type worker struct {
 	cancel context.CancelFunc
 }
 
-// A level is a worker's latest peaks and averages; nil when it has none.
+// inlineChannels is the channel count carried inline in a level message
+// without heap allocation.
+const inlineChannels = 8
+
+// A level is a worker's latest peaks and averages; n < 0 when it has none.
 type level struct {
-	w           *worker
-	key         uint32
-	peaks, avgs []float64
+	w        *worker
+	key      uint32
+	n        int
+	peaksBuf [inlineChannels]float64
+	avgsBuf  [inlineChannels]float64
+	peaks    []float64
+	avgs     []float64
+}
+
+func (l *level) slices() (peaks, avgs []float64) {
+	if l.n <= inlineChannels {
+		return l.peaksBuf[:l.n], l.avgsBuf[:l.n]
+	}
+	return l.peaks, l.avgs
+}
+
+// meterState holds a target's latest peaks, highest peaks since the last
+// snapshot, and latest averages, all owned by Meter.Run.
+type meterState struct {
+	latest []float64
+	held   []float64
+	avgs   []float64
 }
 
 // Run measures until ctx is done.
 func (m *Meter) Run(ctx context.Context) {
 	workers := make(map[uint32]*worker)
-	// latest are the targets' latest peaks; held the highest since the
-	// last snapshot, which starts from latest.
-	latest := make(map[uint32][]float64)
-	held := make(map[uint32][]float64)
-	avgs := make(map[uint32][]float64)
+	states := make(map[uint32]*meterState)
 	updates := make(chan level, 64)
 	var published time.Time
 	flush := time.NewTimer(time.Hour)
@@ -177,10 +195,8 @@ func (m *Meter) Run(ctx context.Context) {
 					m.log.Printf("pulse: %v: unwatched", w.target)
 					w.cancel()
 					delete(workers, key)
-					if _, ok := latest[key]; ok {
-						delete(latest, key)
-						delete(held, key)
-						delete(avgs, key)
+					if _, ok := states[key]; ok {
+						delete(states, key)
 						dirty = true
 					}
 				}
@@ -198,23 +214,60 @@ func (m *Meter) Run(ctx context.Context) {
 			if workers[l.key] != l.w {
 				break // from a worker since cancelled
 			}
-			if l.peaks == nil {
-				delete(latest, l.key)
-				delete(held, l.key)
-				delete(avgs, l.key)
+			if l.n < 0 {
+				delete(states, l.key)
 			} else {
-				latest[l.key] = l.peaks
-				held[l.key] = highest(held[l.key], l.peaks)
-				avgs[l.key] = l.avgs
+				peaks, avg := l.slices()
+				st := states[l.key]
+				if st == nil || len(st.latest) != len(peaks) {
+					buf := make([]float64, 3*len(peaks))
+					st = &meterState{
+						latest: buf[:len(peaks)],
+						held:   buf[len(peaks) : 2*len(peaks)],
+						avgs:   buf[2*len(peaks):],
+					}
+					states[l.key] = st
+				}
+				copy(st.latest, peaks)
+				for i, v := range peaks {
+					st.held[i] = max(st.held[i], v)
+				}
+				copy(st.avgs, avg)
 			}
 			dirty = true
 		case <-flush.C:
 			flushing = false
 			published = time.Now()
-			m.snap.Store(&Snapshot{Peaks: held, Averages: maps.Clone(avgs)})
-			// A level that fell while held shows in the next snapshot.
-			dirty = !maps.EqualFunc(held, latest, slices.Equal)
-			held = maps.Clone(latest)
+			snap := &Snapshot{}
+			if n := len(states); n > 0 {
+				total := 0
+				for _, st := range states {
+					total += len(st.held)
+				}
+				vals := make([]float64, 2*total)
+				peaks := make(map[uint32][]float64, n)
+				avgs := make(map[uint32][]float64, n)
+				off := 0
+				for key, st := range states {
+					k := len(st.held)
+					p := vals[off : off+k : off+k]
+					copy(p, st.held)
+					off += k
+					a := vals[off : off+k : off+k]
+					copy(a, st.avgs)
+					off += k
+					peaks[key] = p
+					avgs[key] = a
+					// A level that fell while held shows in the next snapshot.
+					if !slices.Equal(st.held, st.latest) {
+						dirty = true
+						copy(st.held, st.latest)
+					}
+				}
+				snap.Peaks = peaks
+				snap.Averages = avgs
+			}
+			m.snap.Store(snap)
 			select {
 			case m.updated <- struct{}{}:
 			default:
@@ -227,25 +280,23 @@ func (m *Meter) Run(ctx context.Context) {
 	}
 }
 
-// highest returns each channel's highest of a and b, in a new slice; b if
-// they don't match.
-func highest(a, b []float64) []float64 {
-	if len(a) != len(b) {
-		return b
-	}
-	h := make([]float64, len(a))
-	for i := range a {
-		h[i] = max(a[i], b[i])
-	}
-	return h
-}
-
 // measure runs w's streams until ctx is done, waiting longer after each
 // that fails before it makes another, and sends their peaks to updates.
 func (m *Meter) measure(ctx context.Context, w *worker, key uint32, updates chan<- level) {
 	send := func(peaks, avgs []float64) bool {
+		l := level{w: w, key: key, n: -1}
+		if peaks != nil {
+			l.n = len(peaks)
+			if len(peaks) <= inlineChannels {
+				copy(l.peaksBuf[:], peaks)
+				copy(l.avgsBuf[:], avgs)
+			} else {
+				l.peaks = slices.Clone(peaks)
+				l.avgs = slices.Clone(avgs)
+			}
+		}
 		select {
-		case updates <- level{w, key, peaks, avgs}:
+		case updates <- l:
 			return true
 		case <-ctx.Done():
 			return false
@@ -327,22 +378,42 @@ func (m *Meter) stream(ctx context.Context, t Target, send func(peaks, avgs []fl
 
 	frame := 4 * channels
 	ms := make([]float64, channels)
+	peaks := make([]float64, channels)
+	avgs := make([]float64, channels)
+	last := make([]float64, 0, channels)
+	lastAvgs := make([]float64, 0, channels)
 	alpha := 1 - math.Exp(-1/(float64(m.rate)*averageTime.Seconds()))
-	var last, lastAvgs []float64
+	timeout := max(stale, 3*m.Interval())
+	var lastAt time.Time
+	armed := false
+	arm := func(now time.Time) {
+		lastAt = now
+		if !armed {
+			nc.SetReadDeadline(now.Add(timeout))
+			armed = true
+		}
+	}
 	silent, since := true, time.Now()
 	skip := t.Kind == JACK
 	if skip {
-		nc.SetReadDeadline(time.Now().Add(max(stale, 3*m.Interval())))
+		arm(time.Now())
 	}
 	for {
-		p, err := readPacket(nc)
-		if errors.As(err, &ne) && ne.Timeout() {
-			skip = false
+		p, idle, err := c.pr.read()
+		if idle {
+			now := time.Now()
+			if next := lastAt.Add(timeout); now.Before(next) {
+				nc.SetReadDeadline(next)
+				continue
+			}
+			skip, armed = false, false
 			nc.SetReadDeadline(time.Time{})
-			silent, since = true, time.Now()
-			m.log.Printf("pulse: %v: no peaks for %v; showing 0 until they come", t, max(stale, 3*m.Interval()))
+			silent, since = true, now
+			m.log.Printf("pulse: %v: no peaks for %v; showing 0 until they come", t, timeout)
 			clear(ms)
-			last, lastAvgs = make([]float64, channels), make([]float64, channels)
+			last, lastAvgs = last[:channels], lastAvgs[:channels]
+			clear(last)
+			clear(lastAvgs)
 			if !send(last, lastAvgs) {
 				return ran, ctx.Err()
 			}
@@ -365,11 +436,11 @@ func (m *Meter) stream(ctx context.Context, t Target, send func(peaks, avgs []fl
 		}
 		if skip {
 			skip = false
-			nc.SetReadDeadline(time.Now().Add(max(stale, 3*m.Interval())))
+			arm(time.Now())
 			continue
 		}
 		// Usually one frame; if more came, each channel's largest.
-		peaks := make([]float64, channels)
+		clear(peaks)
 		for f := 0; f+frame <= len(p.data); f += frame {
 			for ch := range channels {
 				v := math.Abs(float64(math.Float32frombits(binary.LittleEndian.Uint32(p.data[f+4*ch:]))))
@@ -377,18 +448,19 @@ func (m *Meter) stream(ctx context.Context, t Target, send func(peaks, avgs []fl
 				ms[ch] += alpha * (v*v - ms[ch])
 			}
 		}
-		avgs := make([]float64, channels)
 		for ch := range avgs {
 			avgs[ch] = math.Sqrt(ms[ch])
 		}
+		now := time.Now()
 		if silent {
-			m.log.Printf("pulse: %v: peaks after %v", t, time.Since(since).Round(time.Millisecond))
+			m.log.Printf("pulse: %v: peaks after %v", t, now.Sub(since).Round(time.Millisecond))
 			silent = false
 		}
 		ran = true
-		nc.SetReadDeadline(time.Now().Add(max(stale, 3*m.Interval())))
+		arm(now)
 		if !slices.Equal(peaks, last) || !slices.Equal(avgs, lastAvgs) {
-			last, lastAvgs = peaks, avgs
+			last = append(last[:0], peaks...)
+			lastAvgs = append(lastAvgs[:0], avgs...)
 			if !send(peaks, avgs) {
 				return ran, ctx.Err()
 			}
@@ -399,6 +471,7 @@ func (m *Meter) stream(ctx context.Context, t Target, send func(peaks, avgs []fl
 // A conn is a connection to the server, while it's set up.
 type conn struct {
 	c   net.Conn
+	pr  *packetReader
 	tag uint32
 }
 
@@ -411,7 +484,7 @@ func (c *conn) command(cmd uint32) *builder {
 // reply reads the reply to the command with tag, skipping other messages.
 func (c *conn) reply(tag uint32) (*reader, error) {
 	for {
-		p, err := readPacket(c.c)
+		p, _, err := c.pr.read()
 		if err != nil {
 			return nil, err
 		}
@@ -457,7 +530,7 @@ func dial(ctx context.Context) (*conn, error) {
 	}
 	stop := context.AfterFunc(ctx, func() { nc.Close() })
 	defer stop()
-	c := &conn{c: nc}
+	c := &conn{c: nc, pr: newPacketReader(nc)}
 	nc.SetDeadline(time.Now().Add(ioTimeout))
 	if err := c.handshake(); err != nil {
 		nc.Close()

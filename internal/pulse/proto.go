@@ -1,6 +1,7 @@
 package pulse
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -126,20 +127,44 @@ type packet struct {
 	data    []byte
 }
 
-// readPacket reads the next packet: a descriptor (length, channel, offset
-// high and low, flags; big-endian) and its payload.
-func readPacket(r io.Reader) (packet, error) {
-	var d [descriptorSize]byte
-	if _, err := io.ReadFull(r, d[:]); err != nil {
-		return packet{}, err
+// A packetReader reads packets through a buffered reader, reusing its
+// header and payload buffers across calls.
+type packetReader struct {
+	r   *bufio.Reader
+	hdr [descriptorSize]byte
+	buf []byte
+}
+
+func newPacketReader(r io.Reader) *packetReader {
+	return &packetReader{r: bufio.NewReaderSize(r, 4096)}
+}
+
+// read reads the next packet. The returned data slice is overwritten by
+// the next call to read. idleTimeout is true if a read timeout occurred
+// before any byte of the packet was read.
+func (pr *packetReader) read() (p packet, idleTimeout bool, err error) {
+	if _, err := pr.r.Peek(1); err != nil {
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			return packet{}, true, err
+		}
+		return packet{}, false, err
 	}
-	n := binary.BigEndian.Uint32(d[0:])
+	if _, err := io.ReadFull(pr.r, pr.hdr[:]); err != nil {
+		return packet{}, false, err
+	}
+	n := binary.BigEndian.Uint32(pr.hdr[0:])
 	if n > maxPacket {
-		return packet{}, fmt.Errorf("packet of %d bytes", n)
+		return packet{}, false, fmt.Errorf("packet of %d bytes", n)
 	}
-	p := packet{channel: binary.BigEndian.Uint32(d[4:]), data: make([]byte, n)}
-	_, err := io.ReadFull(r, p.data)
-	return p, err
+	if cap(pr.buf) < int(n) {
+		pr.buf = make([]byte, n)
+	}
+	data := pr.buf[:n]
+	if _, err := io.ReadFull(pr.r, data); err != nil {
+		return packet{}, false, err
+	}
+	return packet{channel: binary.BigEndian.Uint32(pr.hdr[4:]), data: data}, false, nil
 }
 
 // writePacket writes a control packet.

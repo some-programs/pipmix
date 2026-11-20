@@ -118,8 +118,9 @@ func (s *fakeServer) serve(c net.Conn) {
 	defer c.Close()
 	fc := &fakeConn{c: c, closed: make(chan struct{})}
 	defer close(fc.closed)
+	pr := newPacketReader(c)
 	for {
-		p, err := readPacket(c)
+		p, _, err := pr.read()
 		if err != nil {
 			return
 		}
@@ -177,14 +178,7 @@ func (s *fakeServer) serve(c net.Conn) {
 // peaks sends one frame of peaks on the stream's channel.
 func (fc *fakeConn) peaks(t *testing.T, peaks ...float32) {
 	t.Helper()
-	data := make([]byte, 0, 4*len(peaks))
-	for _, p := range peaks {
-		data = binary.LittleEndian.AppendUint32(data, math.Float32bits(p))
-	}
-	d := make([]byte, descriptorSize)
-	binary.BigEndian.PutUint32(d, uint32(len(data)))
-	binary.BigEndian.PutUint32(d[4:], 3)
-	if _, err := fc.c.Write(append(d, data...)); err != nil {
+	if _, err := fc.c.Write(makePeakPacket(3, peaks...)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -447,4 +441,89 @@ func TestMeterJACK(t *testing.T) {
 	waitLevels(t, m, func(l map[uint32][]float64) bool {
 		return slices.Equal(l[5], []float64{0.25, 0.75})
 	})
+}
+
+func makePeakPacket(channel uint32, peaks ...float32) []byte {
+	b := make([]byte, descriptorSize, descriptorSize+4*len(peaks))
+	binary.BigEndian.PutUint32(b[0:], uint32(4*len(peaks)))
+	binary.BigEndian.PutUint32(b[4:], channel)
+	for _, p := range peaks {
+		b = binary.LittleEndian.AppendUint32(b, math.Float32bits(p))
+	}
+	return b
+}
+
+func TestPacketReaderTimeoutAndCoalesce(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	pr := newPacketReader(c1)
+
+	// Idle timeout before any byte arrives leaves framing intact.
+	c1.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+	_, idle, err := pr.read()
+	if err == nil || !idle {
+		t.Fatalf("read on idle pipe = (idle=%v, err=%v), want (true, timeout)", idle, err)
+	}
+	c1.SetReadDeadline(time.Time{})
+
+	// Two coalesced packets arrive in a single write.
+	pkt1 := makePeakPacket(3, 0.25, 0.5)
+	pkt2 := makePeakPacket(3, 0.75, 1.0)
+	go func() {
+		_, _ = c2.Write(append(pkt1, pkt2...))
+	}()
+
+	p1, idle, err := pr.read()
+	if err != nil || idle || p1.channel != 3 || len(p1.data) != 8 {
+		t.Fatalf("first packet = (%+v, idle=%v, err=%v)", p1, idle, err)
+	}
+	if v := math.Float32frombits(binary.LittleEndian.Uint32(p1.data)); v != 0.25 {
+		t.Fatalf("first sample = %v, want 0.25", v)
+	}
+
+	p2, idle, err := pr.read()
+	if err != nil || idle || p2.channel != 3 || len(p2.data) != 8 {
+		t.Fatalf("second packet = (%+v, idle=%v, err=%v)", p2, idle, err)
+	}
+	if v := math.Float32frombits(binary.LittleEndian.Uint32(p2.data)); v != 0.75 {
+		t.Fatalf("second sample = %v, want 0.75", v)
+	}
+}
+
+func TestMeterContinuousAndManyChannels(t *testing.T) {
+	s := newFakeServer(t)
+	m := NewMeter(nil, 0)
+	ctx := t.Context()
+	go m.Run(ctx)
+
+	chNames := make([]string, inlineChannels+2)
+	want := make([]float64, len(chNames))
+	sendPeaks := make([]float32, len(chNames))
+	for i := range chNames {
+		chNames[i] = "FL"
+		want[i] = 0.5
+		sendPeaks[i] = 0.5
+	}
+	m.Watch(map[uint32]Target{
+		1: {Kind: Sink, Name: "multi", Channels: chNames},
+	})
+	c := s.conn()
+	if c.channels != len(chNames) {
+		t.Fatalf("channels = %d, want %d", c.channels, len(chNames))
+	}
+
+	// Stream continuously past stale to ensure lazy deadlines extend without
+	// spuriously zeroing the meter.
+	c.peaks(t, sendPeaks...)
+	waitLevels(t, m, func(l map[uint32][]float64) bool { return slices.Equal(l[1], want) })
+	end := time.Now().Add(stale + 50*time.Millisecond)
+	for time.Now().Before(end) {
+		time.Sleep(25 * time.Millisecond)
+		c.peaks(t, sendPeaks...)
+		if got := m.Snapshot().Peaks[1]; !slices.Equal(got, want) {
+			t.Fatalf("levels dropped during continuous stream: %v, want %v", got, want)
+		}
+	}
 }
