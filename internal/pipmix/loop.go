@@ -64,6 +64,8 @@ func run(ctx context.Context, m *mixer) error {
 	}
 
 	var (
+		done   = ctx.Done()
+		events = t.Events()
 		grid   = tui.NewGrid(0, 0)
 		screen = tui.NewScreen(t)
 		frame  = time.Second / time.Duration(m.opts.fps)
@@ -80,9 +82,9 @@ func run(ctx context.Context, m *mixer) error {
 	timer.Stop()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-done:
 			return nil
-		case ev := <-t.Events():
+		case ev := <-events:
 			switch ev := ev.(type) {
 			case tui.ResizeEvent:
 				m.setSize(ev.Width, ev.Height)

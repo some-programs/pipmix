@@ -1,6 +1,10 @@
 package tui
 
-import "github.com/charmbracelet/x/ansi"
+import (
+	"unicode/utf8"
+
+	"github.com/charmbracelet/x/ansi"
+)
 
 // Ellipsis ends text that a pen clips.
 const Ellipsis = "…"
@@ -50,17 +54,38 @@ func (p *Pen) Text(s string, st Style) {
 	}
 }
 
+func glyphWidth(glyph string) int {
+	if len(glyph) == 1 && glyph[0] >= 0x20 && glyph[0] < 0x7f {
+		return 1
+	}
+	// Box Drawing (U+2500..U+257F) and Block Elements (U+2580..U+259F) all
+	// have display width 1.
+	if r, size := utf8.DecodeRuneInString(glyph); size == len(glyph) && r >= 0x2500 && r <= 0x259f {
+		return 1
+	}
+	return min(ansi.StringWidth(glyph), 2)
+}
+
 // Repeat writes n copies of the grapheme glyph in style st.
 func (p *Pen) Repeat(glyph string, n int, st Style) {
 	if n <= 0 || p.full {
 		return
 	}
 	st.Attrs |= p.attrs
-	w := min(ansi.StringWidth(glyph), 2)
+	w := glyphWidth(glyph)
 	if w == 0 {
 		return
 	}
 	c := Cell{Content: glyph, Width: uint8(w), Style: st}
+	if w == 1 {
+		fill := min(n, p.end-p.x)
+		p.g.fill1(p.x, p.y, fill, c)
+		p.x += fill
+		if n > fill {
+			p.clip(st)
+		}
+		return
+	}
 	for range n {
 		if p.x+w > p.end {
 			p.clip(st)
@@ -76,8 +101,10 @@ func (p *Pen) Repeat(glyph string, n int, st Style) {
 func (p *Pen) Pad(st Style) {
 	st.Attrs |= p.attrs
 	c := Cell{Content: " ", Width: 1, Style: st}
-	for ; p.x < min(p.want, p.end); p.x++ {
-		p.g.set(p.x, p.y, c)
+	limit := min(p.want, p.end)
+	if p.x < limit {
+		p.g.fill1(p.x, p.y, limit-p.x, c)
+		p.x = limit
 	}
 	if p.want > p.end && !p.full {
 		p.clip(st)

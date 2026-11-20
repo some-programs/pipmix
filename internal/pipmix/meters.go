@@ -142,15 +142,20 @@ func (m *mixer) watchMeters() {
 	m.meter.Watch(targets)
 }
 
+var emptyMeterSnap pulse.Snapshot
+
+func (m *mixer) meterSnapshot() *pulse.Snapshot {
+	if m.meter != nil {
+		return m.meter.Snapshot()
+	}
+	return &emptyMeterSnap
+}
+
 func (m *mixer) startMetering() command {
 	if m.ticking {
 		return nil
 	}
-	snap := &pulse.Snapshot{}
-	if m.meter != nil {
-		snap = m.meter.Snapshot()
-	}
-	if !m.setLevels(snap, time.Now()) {
+	if !m.setLevels(m.meterSnapshot(), time.Now()) {
 		return m.waitMeter()
 	}
 	m.ticking = true
@@ -160,11 +165,7 @@ func (m *mixer) startMetering() command {
 // tickMetering moves the meters on. The event loop calls it every frame
 // while m.ticking is set.
 func (m *mixer) tickMetering() command {
-	snap := &pulse.Snapshot{}
-	if m.meter != nil {
-		snap = m.meter.Snapshot()
-	}
-	if !m.setLevels(snap, time.Now()) {
+	if !m.setLevels(m.meterSnapshot(), time.Now()) {
 		m.ticking = false
 		return m.waitMeter()
 	}
@@ -185,8 +186,13 @@ func (m *mixer) setLevels(snap *pulse.Snapshot, now time.Time) (moving bool) {
 	release := 1 - math.Exp(-dt/sm.release.Seconds())
 	var buf [32]float64
 
-	shown := func(id uint32) bool { return m.meterNode(id, source[id]) != nil }
-	m.fill, m.fillStart = prune(m.fill, shown), prune(m.fillStart, shown)
+	if m.fill == nil || snap != m.levelsSnap || m.snap != m.levelsPWSnap || m.meterMode != m.levelsMode {
+		shown := func(id uint32) bool { return m.meterNode(id, source[id]) != nil }
+		m.fill, m.fillStart = prune(m.fill, shown), prune(m.fillStart, shown)
+		shown = func(id uint32) bool { return m.meterNode(id, snap.Peaks[id]) != nil }
+		m.dot, m.dotHold = prune(m.dot, shown), prune(m.dotHold, shown)
+		m.levelsSnap, m.levelsPWSnap, m.levelsMode = snap, m.snap, m.meterMode
+	}
 	for id, raw := range source {
 		n := m.meterNode(id, raw)
 		if n == nil {
@@ -219,8 +225,6 @@ func (m *mixer) setLevels(snap *pulse.Snapshot, now time.Time) (moving bool) {
 		}
 	}
 
-	shown = func(id uint32) bool { return m.meterNode(id, snap.Peaks[id]) != nil }
-	m.dot, m.dotHold = prune(m.dot, shown), prune(m.dotHold, shown)
 	for id, raw := range snap.Peaks {
 		n := m.meterNode(id, raw)
 		if n == nil {

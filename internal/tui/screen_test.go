@@ -77,6 +77,7 @@ func (t *vt) Write(p []byte) (int, error) {
 func TestScreenFlush(t *testing.T) {
 	r := rand.New(rand.NewPCG(1, 2))
 	words := []string{"a", "hello", "日本", "🔊", "█", "▓▓", "x", " ", "é", "…"}
+	glyphs := []string{"a", "日", "🔊", "█", "▓", "x", " ", "é", "…"}
 	styles := []Style{{}, {Fg: Red}, {Fg: BrightGreen, Attrs: Bold}, {Attrs: Underline | Reverse}, {Attrs: Underline, UnderlineColor: BrightBlack}}
 	for _, size := range [][2]int{{1, 1}, {7, 3}, {30, 10}} {
 		term := &vt{g: NewGrid(size[0], size[1])}
@@ -91,7 +92,16 @@ func TestScreenFlush(t *testing.T) {
 			for range r.IntN(8) {
 				x, y := r.IntN(size[0]), r.IntN(size[1])
 				p := g.Pen(x, y, x+r.IntN(size[0]-x+1))
-				p.Text(words[r.IntN(len(words))], styles[r.IntN(len(styles))])
+				st := styles[r.IntN(len(styles))]
+				switch r.IntN(3) {
+				case 0:
+					p.Repeat(glyphs[r.IntN(len(glyphs))], r.IntN(6), st)
+				case 1:
+					p.Text(words[r.IntN(len(words))], st)
+					p.Pad(st)
+				default:
+					p.Text(words[r.IntN(len(words))], st)
+				}
 			}
 			if frame == 150 {
 				s.Redraw()

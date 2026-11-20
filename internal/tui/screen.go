@@ -39,14 +39,15 @@ func (s *Screen) Flush(g *Grid) error {
 		s.buf = appendSGR(s.buf, Style{})
 		s.buf = append(s.buf, "\x1b[H\x1b[2J"...)
 		s.style, s.cx, s.reset = Style{}, -1, false
+		full := rowSpan{0, g.w}
 		for y := range g.dirty {
-			g.dirty[y] = true
+			g.dirty[y] = full
 		}
 	}
-	for y, dirty := range g.dirty {
-		if dirty {
-			s.flushRow(g, y)
-			g.dirty[y] = false
+	for y, d := range g.dirty {
+		if d.lo < d.hi {
+			s.flushRow(g, y, d.lo, d.hi)
+			g.dirty[y] = rowSpan{}
 		}
 	}
 	if len(s.buf) == len(syncStart) {
@@ -57,9 +58,9 @@ func (s *Screen) Flush(g *Grid) error {
 	return err
 }
 
-func (s *Screen) flushRow(g *Grid, y int) {
+func (s *Screen) flushRow(g *Grid, y, lo, hi int) {
 	row, front := g.row(y), s.front.row(y)
-	for x := 0; x < len(row); {
+	for x := lo; x < hi; {
 		if row[x] == front[x] {
 			x++
 			continue
@@ -67,13 +68,13 @@ func (s *Screen) flushRow(g *Grid, y int) {
 		if row[x].Width == 0 && x > 0 {
 			x-- // Start at the left half of a wide cell.
 		}
-		for x < len(row) {
+		for x < hi {
 			if row[x] == front[x] {
 				j := x
-				for j < len(row) && row[j] == front[j] {
+				for j < hi && row[j] == front[j] {
 					j++
 				}
-				if j == len(row) || j-x > maxGap {
+				if j == hi || j-x > maxGap {
 					x = j
 					break
 				}
@@ -81,7 +82,7 @@ func (s *Screen) flushRow(g *Grid, y int) {
 			x += s.writeCell(row, x, y)
 		}
 	}
-	copy(front, row)
+	copy(front[lo:hi], row[lo:hi])
 }
 
 // writeCell writes the cell at x, y and returns how many cells it covers.

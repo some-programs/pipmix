@@ -683,24 +683,52 @@ const (
 	faderEmpty = "░"
 )
 
-type barCell struct {
-	glyph string
-	style uint8
-}
-
-// drawCells draws cells into p, as runs of a glyph in one style.
-func drawCells(p *tui.Pen, cells []barCell, styles []tui.Style) {
-	for i := 0; i < len(cells); {
-		j := i + 1
-		for j < len(cells) && cells[j] == cells[i] {
-			j++
+// drawBarRuns calls p.Repeat for each contiguous run in [0, n), splitting
+// only at the positions where cell(i) can change.
+func drawBarRuns(p *tui.Pen, n, hundred, lit, pk int, look meterLook, cell func(i int) (string, tui.Style)) {
+	if n <= 0 {
+		return
+	}
+	var pts [6]int
+	k := 0
+	add := func(x int) {
+		if x > 0 && x < n {
+			pts[k] = x
+			k++
 		}
-		p.Repeat(cells[i].glyph, j-i, styles[cells[i].style])
-		i = j
+	}
+	add(hundred + 1)
+	if lit > 0 {
+		add(lit)
+		if look == meterDot {
+			add(lit - 1)
+		}
+	}
+	if pk > 0 {
+		add(pk - 1)
+		add(pk)
+	}
+	pts[k] = n
+	k++
+	for i := 1; i < k; i++ {
+		v := pts[i]
+		j := i - 1
+		for j >= 0 && pts[j] > v {
+			pts[j+1] = pts[j]
+			j--
+		}
+		pts[j+1] = v
+	}
+	start := 0
+	for _, end := range pts[:k] {
+		if end <= start {
+			continue
+		}
+		glyph, st := cell(start)
+		p.Repeat(glyph, end-start, st)
+		start = end
 	}
 }
-
-var meterBarStyles = []tui.Style{barFullStyle, barOverStyle, brightFull, brightOver, dimStyle}
 
 // drawMeterBar draws a level meter of width cells without a volume fader.
 func drawMeterBar(p *tui.Pen, level, peak float64, width int, limit float64, look meterLook) {
@@ -721,38 +749,26 @@ func drawMeterBar(p *tui.Pen, level, peak float64, width int, limit float64, loo
 		return
 	}
 	hundred := knobCell(1, limit, width)
-	var cellBuf [256]barCell
-	var cells []barCell
-	if width <= len(cellBuf) {
-		cells = cellBuf[:width]
-	} else {
-		cells = make([]barCell, width)
-	}
-	for i := range cells {
-		var over uint8
+	drawBarRuns(p, width, hundred, lit, pk, look, func(i int) (string, tui.Style) {
+		full, bright := barFullStyle, brightFull
 		if i > hundred {
-			over = 1
+			full, bright = barOverStyle, brightOver
 		}
-		c := barCell{faderEmpty, 4}
 		switch {
+		case i == pk-1, i == lit-1 && look == meterDot:
+			return faderKnob, bright
 		case i < lit && (look == meterSolid || look == meterShade):
-			c = barCell{faderKnob, over}
-		case i == lit-1 && look == meterDot:
-			c = barCell{faderKnob, 2 + over}
+			return faderKnob, full
+		default:
+			return faderEmpty, dimStyle
 		}
-		if i == pk-1 {
-			c = barCell{faderKnob, 2 + over}
-		}
-		cells[i] = c
-	}
-	drawCells(p, cells, meterBarStyles)
+	})
 }
 
 var (
 	emptyOverStyle = tui.Style{Fg: tui.Red, Attrs: tui.Faint}
 	brightFull     = tui.Style{Fg: tui.BrightGreen}
 	brightOver     = tui.Style{Fg: tui.BrightRed}
-	barStyles      = []tui.Style{barFullStyle, barOverStyle, brightFull, brightOver}
 )
 
 // drawBar draws a fader of width cells for volume v, level, and peak on
@@ -782,33 +798,22 @@ func drawBar(p *tui.Pen, v, level, peak float64, width int, limit float64, muted
 			pk = min(knobCell(peak, limit, width), knob)
 		}
 	}
-	var cellBuf [256]barCell
-	var cells []barCell
-	if knob <= len(cellBuf) {
-		cells = cellBuf[:knob]
-	} else {
-		cells = make([]barCell, knob)
-	}
-	for i := range cells {
-		var over uint8
+	drawBarRuns(p, knob, hundred, lit, pk, look, func(i int) (string, tui.Style) {
+		full, bright := barFullStyle, brightFull
 		if i > hundred {
-			over = 1
+			full, bright = barOverStyle, brightOver
 		}
-		c := barCell{faderFull, over}
 		switch {
+		case i == pk-1, i == lit-1 && look == meterDot:
+			return faderKnob, bright
 		case i < lit && (look == meterSolid || look == meterShade):
-			c.glyph = faderKnob
-		case i == lit-1 && look == meterDot:
-			c = barCell{faderKnob, 2 + over}
+			return faderKnob, full
 		case look == meterShade:
-			c.glyph = "▒"
+			return "▒", full
+		default:
+			return faderFull, full
 		}
-		if i == pk-1 {
-			c = barCell{faderKnob, 2 + over}
-		}
-		cells[i] = c
-	}
-	drawCells(p, cells, barStyles)
+	})
 	p.Repeat(faderKnob, 1, knobStyle)
 	p.Repeat(faderEmpty, max(knob+1, hundred+1)-(knob+1), dimStyle)
 	p.Repeat(faderEmpty, width-max(knob+1, hundred+1), emptyOverStyle)

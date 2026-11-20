@@ -3,20 +3,26 @@ package tui
 // Cell is one cell of a grid. A wide grapheme takes two cells: the left one
 // holds it and has Width 2, and the right one is empty and has Width 0.
 type Cell struct {
-	Content string
-	Width   uint8
 	Style   Style
+	Width   uint8
+	Content string
 }
 
 // Blank is an empty cell in the default style.
 var Blank = Cell{Content: " ", Width: 1}
 
-// Grid is a screen of cells. It remembers which rows changed since they
-// were last flushed to a terminal.
+// rowSpan is the half-open range [lo, hi) of dirty columns on one row.
+// lo >= hi means the row is clean.
+type rowSpan struct {
+	lo, hi int
+}
+
+// Grid is a screen of cells. It remembers which cells of each row changed
+// since they were last flushed to a terminal.
 type Grid struct {
 	w, h  int
 	cells []Cell
-	dirty []bool
+	dirty []rowSpan
 }
 
 // NewGrid returns a blank grid of w×h cells.
@@ -38,7 +44,7 @@ func (g *Grid) Resize(w, h int) {
 	if cap(g.dirty) >= h {
 		g.dirty = g.dirty[:h]
 	} else {
-		g.dirty = make([]bool, h)
+		g.dirty = make([]rowSpan, h)
 	}
 	g.Clear()
 }
@@ -51,8 +57,9 @@ func (g *Grid) Clear() {
 	for i := range g.cells {
 		g.cells[i] = Blank
 	}
+	full := rowSpan{0, g.w}
 	for y := range g.dirty {
-		g.dirty[y] = true
+		g.dirty[y] = full
 	}
 }
 
@@ -61,21 +68,73 @@ func (g *Grid) At(x, y int) Cell { return g.cells[y*g.w+x] }
 
 func (g *Grid) row(y int) []Cell { return g.cells[y*g.w : (y+1)*g.w] }
 
+func (g *Grid) mark(y, lo, hi int) {
+	d := &g.dirty[y]
+	if d.lo >= d.hi {
+		d.lo, d.hi = lo, hi
+		return
+	}
+	if lo < d.lo {
+		d.lo = lo
+	}
+	if hi > d.hi {
+		d.hi = hi
+	}
+}
+
 // set puts c at x, y, blanking what remains of wide cells it overwrites
 // in part. c must fit in the row.
 func (g *Grid) set(x, y int, c Cell) {
 	row := g.row(y)
+	if c.Width == 1 && row[x] == c {
+		return
+	}
+	lo, hi := x, x+int(c.Width)
 	if row[x].Width == 0 && x > 0 {
 		row[x-1] = Blank
+		lo = x - 1
 	}
 	if end := x + int(c.Width); row[end-1].Width == 2 && end < len(row) {
 		row[end] = Blank
+		hi = end + 1
 	}
 	row[x] = c
 	if c.Width == 2 {
 		row[x+1] = Cell{Style: c.Style}
 	}
-	g.dirty[y] = true
+	g.mark(y, lo, hi)
+}
+
+// fill1 writes n copies of the 1-wide cell c starting at x, y. The range
+// [x, x+n) must fit in the row.
+func (g *Grid) fill1(x, y, n int, c Cell) {
+	if n <= 0 {
+		return
+	}
+	row := g.row(y)
+	end := x + n
+	lo, hi := end, x
+	if row[x].Width == 0 && x > 0 {
+		row[x-1] = Blank
+		lo, hi = x-1, x
+	}
+	rightBlank := end < len(row) && row[end-1].Width == 2
+	for i := x; i < end; i++ {
+		if row[i] != c {
+			row[i] = c
+			if i < lo {
+				lo = i
+			}
+			hi = i + 1
+		}
+	}
+	if rightBlank {
+		row[end] = Blank
+		hi = end + 1
+	}
+	if lo < hi {
+		g.mark(y, lo, hi)
+	}
 }
 
 // Pen returns a pen that writes row y from column x, clipping at column end.

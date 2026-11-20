@@ -111,7 +111,10 @@ type mixer struct {
 	dot          map[uint32][]float64
 	dotHold      map[uint32][]time.Time
 	levelsAt     time.Time
-	meterRows    []meterRow // where the last draw put meters
+	levelsSnap   *pulse.Snapshot // last meter snapshot pruned against
+	levelsPWSnap *pw.Snapshot    // last PipeWire snapshot pruned against
+	levelsMode   meterMode       // last meterMode pruned against
+	meterRows    []meterRow      // where the last draw put meters
 	ticking      bool
 	meterWaiting bool // a waitMeter command is pending
 	blurred      bool

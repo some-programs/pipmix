@@ -63,4 +63,32 @@ func TestWideOverwrite(t *testing.T) {
 	if got, want := g.String(), " x本y "; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
+
+	p = g.Pen(0, 0, 6)
+	p.Text("日本語", Style{})
+	q = g.Pen(1, 0, 6)
+	q.Repeat("▓", 4, Style{})
+	if got, want := g.String(), " ▓▓▓▓ "; got != want {
+		t.Errorf("Repeat over wide cells = %q, want %q", got, want)
+	}
+}
+
+func TestGlyphWidthMatchesANSI(t *testing.T) {
+	for r := rune(0x20); r < 0x7f; r++ {
+		s := string(r)
+		if got, want := glyphWidth(s), min(ansi.StringWidth(s), 2); got != want {
+			t.Errorf("glyphWidth(%q) = %d, want %d", s, got, want)
+		}
+	}
+	for r := rune(0x2500); r <= 0x259f; r++ {
+		s := string(r)
+		if got, want := glyphWidth(s), min(ansi.StringWidth(s), 2); got != want {
+			t.Errorf("glyphWidth(%q U+%04X) = %d, want %d", s, r, got, want)
+		}
+	}
+	for _, s := range []string{"", "日", "🔊", "é", "\x00"} {
+		if got, want := glyphWidth(s), min(ansi.StringWidth(s), 2); got != want {
+			t.Errorf("glyphWidth(%q) = %d, want %d", s, got, want)
+		}
+	}
 }
