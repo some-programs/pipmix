@@ -2,9 +2,11 @@ package pipmix
 
 import (
 	"strings"
+	"testing"
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/some-programs/pipmix/internal/pw"
 	"github.com/some-programs/pipmix/internal/tui"
 )
 
@@ -56,4 +58,23 @@ func penText(width int, draw func(p *tui.Pen)) string {
 	p := g.Pen(0, 0, width)
 	draw(&p)
 	return strings.TrimRight(ansi.Strip(g.String()), " ")
+}
+
+func TestItemHeightMatchesItemLines(t *testing.T) {
+	m := testMixer()
+	cases := []item{
+		{id: 1, card: &pw.Card{ID: 1, Title: "Card"}},
+		{id: 2, node: &pw.Node{ID: 2, Name: "novol"}},
+		{id: 3, node: &pw.Node{ID: 3, Name: "mono", Channels: []pw.Channel{{Name: "MONO", Volume: 0.5}}}},
+		{id: 4, node: &pw.Node{ID: 4, Name: "folded", Channels: stereo(0.5)}},
+		{id: 5, node: &pw.Node{ID: 5, Name: "unfolded", Channels: []pw.Channel{{Name: "FL", Volume: 0.5}, {Name: "FR", Volume: 0.8}}}},
+		{id: 6, node: &pw.Node{ID: 6, Name: "grp-leader", Channels: stereo(0.5)}, groupCount: 2, groupLeader: true},
+		{id: 7, node: &pw.Node{ID: 7, Name: "grp-member", Channels: stereo(0.5)}, groupCount: 2, groupLeader: false},
+		{id: 8, node: &pw.Node{ID: 8, Name: "grp-member-unfolded", Channels: []pw.Channel{{Name: "FL", Volume: 0.2}, {Name: "FR", Volume: 0.9}}}, groupCount: 2, groupLeader: false},
+	}
+	for _, it := range cases {
+		if got, want := m.itemHeight(it), len(m.itemLines(it)); got != want {
+			t.Errorf("itemHeight(%+v) = %d, want %d", it.id, got, want)
+		}
+	}
 }

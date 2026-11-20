@@ -72,6 +72,8 @@ type node struct {
 	proxy          uint32            // client-side proxy ID
 	class          Class             // stream/device media class
 	props          map[string]string // node properties from registry
+	viewProps      map[string]string // cached Props for snapshot (props merged with client fallback)
+	viewPropsGen   uint64            // session.clientsGen when viewProps was built
 	params         map[uint32]uint32 // param ID → flags from last Node::info event
 	jack           bool              // true if JACK client without media class
 	meter          bool              // true if peak meter stream node
@@ -155,6 +157,7 @@ type session struct {
 	meterPrefix string                       // prefix of meter stream nodes owned by this instance
 	devices     map[uint32]*device           // global ID → audio device/card
 	clients     map[uint32]map[string]string // global ID → client properties
+	clientsGen  uint64                       // incremented whenever clients changes
 	meta        *proxy                       // default metadata proxy, nil if not bound
 	defaults    map[string]string            // default metadata key → node name
 	seq         int32                        // next request sequence number
@@ -184,6 +187,7 @@ func newSession(c *conn, logger *log.Logger, pid int) *session {
 		meterPrefix: fmt.Sprintf("%s%d.", MeterPrefix, pid),
 		devices:     make(map[uint32]*device),
 		clients:     make(map[uint32]map[string]string),
+		clientsGen:  1,
 		defaults:    make(map[string]string),
 		enums:       make(map[int32]*enumReq),
 		syncs:       make(map[int32][]*enumReq),
@@ -314,6 +318,9 @@ func (s *session) handle(m message) error {
 
 // footer reads a message footer: Struct((Id opcode, Struct args)*).
 func (s *session) footer(p pod) {
+	if p.typ != typeStruct {
+		return
+	}
 	f, err := p.fields()
 	if err != nil {
 		return
@@ -441,7 +448,10 @@ func (s *session) registryEvent(op uint8, f *parser) error {
 			}
 		}
 		delete(s.devices, id)
-		delete(s.clients, id)
+		if _, ok := s.clients[id]; ok {
+			delete(s.clients, id)
+			s.clientsGen++
+		}
 		if s.meta != nil && s.meta.global == id {
 			s.meta = nil
 			clear(s.defaults)
@@ -456,6 +466,7 @@ func (s *session) global(id uint32, typ string, version int32, props map[string]
 	switch typ {
 	case ifaceClient:
 		s.clients[id] = props
+		s.clientsGen++
 	case ifaceNode:
 		name := props[propNodeName]
 		meter := strings.HasPrefix(name, MeterPrefix)
@@ -679,6 +690,8 @@ func (s *session) nodeEvent(p *proxy, op uint8, f *parser) error {
 		}
 		if change&nodeChangeProps != 0 {
 			n.props = props
+			n.viewProps = nil
+			n.viewPropsGen = 0
 			if !n.meter {
 				s.dirty = true
 			}
@@ -1193,17 +1206,27 @@ func (s *session) snapshot(now time.Time) *Snapshot {
 }
 
 func (s *session) nodeView(n *node, now time.Time) Node {
-	props := maps.Clone(n.props)
-	if clientID, err := strconv.ParseUint(n.props["client.id"], 10, 32); err == nil {
-		if cp := s.clients[uint32(clientID)]; cp != nil {
-			for _, k := range []string{propApplicationProcessID, propApplicationName} {
-				if _, ok := props[k]; !ok {
-					if val := cp[k]; val != "" {
-						props[k] = val
+	props := n.viewProps
+	if n.viewPropsGen != s.clientsGen {
+		props = n.props
+		if clientID, err := strconv.ParseUint(n.props["client.id"], 10, 32); err == nil {
+			if cp := s.clients[uint32(clientID)]; cp != nil {
+				cloned := false
+				for _, k := range []string{propApplicationProcessID, propApplicationName} {
+					if _, ok := props[k]; !ok {
+						if val := cp[k]; val != "" {
+							if !cloned {
+								props = maps.Clone(n.props)
+								cloned = true
+							}
+							props[k] = val
+						}
 					}
 				}
 			}
 		}
+		n.viewProps = props
+		n.viewPropsGen = s.clientsGen
 	}
 	v := Node{
 		ID:    n.id,

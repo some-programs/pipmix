@@ -39,7 +39,8 @@ type message struct {
 
 type conn struct {
 	c    *net.UnixConn
-	in   []byte
+	buf  []byte // backing buffer for in
+	in   []byte // unread bytes, subslice of buf
 	oob  []byte
 	seq  uint32
 	wbuf []byte
@@ -79,10 +80,17 @@ func (c *conn) read() (message, error) {
 
 // fill reads more data into c.in.
 func (c *conn) fill() error {
+	if len(c.in) == 0 {
+		c.in = c.buf[:0]
+	} else if cap(c.in)-len(c.in) < 4096 && len(c.buf)-len(c.in) >= 4096 {
+		copy(c.buf, c.in)
+		c.in = c.buf[:len(c.in)]
+	}
 	if cap(c.in)-len(c.in) < 4096 {
-		in := make([]byte, len(c.in), 2*cap(c.in)+65536)
-		copy(in, c.in)
-		c.in = in
+		buf := make([]byte, 2*len(c.buf)+65536)
+		copy(buf, c.in)
+		c.buf = buf
+		c.in = buf[:len(c.in)]
 	}
 	n, oobn, _, _, err := c.c.ReadMsgUnix(c.in[len(c.in):cap(c.in)], c.oob)
 	if oobn > 0 {

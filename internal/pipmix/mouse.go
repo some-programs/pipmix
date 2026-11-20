@@ -2,6 +2,7 @@ package pipmix
 
 import (
 	"math"
+	"time"
 
 	"github.com/some-programs/pipmix/internal/tui"
 )
@@ -18,6 +19,7 @@ func (m *mixer) handleMouse(ev tui.MouseEvent) command {
 	case tui.MouseMotion:
 		m.dragTo(ev)
 	case tui.MouseRelease:
+		m.flushDrag(true)
 		m.drag = nil
 	case tui.MouseWheel:
 		delta := wheelRows
@@ -100,7 +102,7 @@ func (m *mixer) click(mouse tui.MouseEvent) command {
 				channel = line.channel
 			}
 			v := m.volumeAt(mouse.X)
-			m.drag = &drag{node: it.id, channel: channel, last: v}
+			m.drag = &drag{node: it.id, channel: channel, last: v, sent: v, sentAt: time.Now()}
 			m.client.SetVolume(it.id, channel, v, m.opts.limit)
 		case lineProfile:
 			return m.openProfileMenu()
@@ -109,15 +111,39 @@ func (m *mixer) click(mouse tui.MouseEvent) command {
 	return nil
 }
 
+func (m *mixer) dragInterval() time.Duration {
+	return time.Second / time.Duration(max(m.opts.fps, 1))
+}
+
 func (m *mixer) dragTo(mouse tui.MouseEvent) {
 	d := m.drag
 	if d == nil || mouse.Button != tui.MouseLeft {
 		return
 	}
-	if v := m.volumeAt(mouse.X); v != d.last {
-		d.last = v
+	v := m.volumeAt(mouse.X)
+	if v == d.last {
+		return
+	}
+	d.last = v
+	if now := time.Now(); now.Sub(d.sentAt) >= m.dragInterval() {
+		d.sent, d.sentAt = v, now
 		m.client.SetVolume(d.node, d.channel, v, m.opts.limit)
 	}
+}
+
+// flushDrag sends a throttled drag volume once the frame interval has
+// elapsed, or immediately when force is true.
+func (m *mixer) flushDrag(force bool) {
+	d := m.drag
+	if d == nil || d.last == d.sent {
+		return
+	}
+	now := time.Now()
+	if !force && now.Sub(d.sentAt) < m.dragInterval() {
+		return
+	}
+	d.sent, d.sentAt = d.last, now
+	m.client.SetVolume(d.node, d.channel, d.last, m.opts.limit)
 }
 
 func (m *mixer) volumeAt(x int) float64 {

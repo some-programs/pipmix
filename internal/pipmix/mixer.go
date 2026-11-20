@@ -96,12 +96,21 @@ type drag struct {
 	node    uint32
 	channel int
 	last    float64
+	sent    float64
+	sentAt  time.Time
+}
+
+type nodePID struct {
+	id  uint32
+	pid string
 }
 
 type mixer struct {
 	client       *pw.Client
 	snap         *pw.Snapshot
 	media        *mpris.Watcher
+	mediaSnap    *mpris.Snapshot // last MPRIS snapshot matched by findMedia
+	mediaNodes   []nodePID       // last playback nodes matched by findMedia
 	mediaTitles  map[uint32]string
 	mediaPlayers map[uint32]mpris.Player
 	meter        *pulse.Meter
@@ -196,11 +205,40 @@ func (m *mixer) init() []command { return []command{m.waitSnapshot(), m.waitMedi
 
 // findMedia matches playback streams to MPRIS players by process ID.
 func (m *mixer) findMedia() {
-	m.mediaTitles = nil
-	m.mediaPlayers = nil
-	if m.media != nil {
-		m.mediaTitles, m.mediaPlayers = streamMedia(m.snap.Nodes, m.media.Snapshot())
+	if m.media == nil {
+		m.mediaTitles = nil
+		m.mediaPlayers = nil
+		m.mediaSnap = nil
+		m.mediaNodes = nil
+		return
 	}
+	ms := m.media.Snapshot()
+	if ms == m.mediaSnap && m.sameMediaNodes() {
+		return
+	}
+	m.mediaSnap = ms
+	m.mediaNodes = m.mediaNodes[:0]
+	for _, n := range m.snap.Nodes {
+		if n.Class != pw.Playback || n.JACK {
+			continue
+		}
+		m.mediaNodes = append(m.mediaNodes, nodePID{id: n.ID, pid: n.Props["application.process.id"]})
+	}
+	m.mediaTitles, m.mediaPlayers = streamMedia(m.snap.Nodes, ms)
+}
+
+func (m *mixer) sameMediaNodes() bool {
+	k := 0
+	for _, n := range m.snap.Nodes {
+		if n.Class != pw.Playback || n.JACK {
+			continue
+		}
+		if k >= len(m.mediaNodes) || m.mediaNodes[k].id != n.ID || m.mediaNodes[k].pid != n.Props["application.process.id"] {
+			return false
+		}
+		k++
+	}
+	return k == len(m.mediaNodes)
 }
 
 func streamMedia(nodes []pw.Node, players *mpris.Snapshot) (map[uint32]string, map[uint32]mpris.Player) {
@@ -241,8 +279,8 @@ func (m *mixer) update(msg message) command {
 	case snapshotMsg:
 		m.snap = m.client.Snapshot()
 		m.findMedia()
-		m.refocus()
-		m.watchMeters()
+		items := m.refocus()
+		m.watchMetersItems(items)
 		return m.waitSnapshot()
 	case mediaMsg:
 		m.findMedia()
@@ -307,6 +345,9 @@ func (m *mixer) items(t tab) []item {
 		}
 	}
 	all := append(items, fixed...)
+	if t != tabDefault && t != tabPlayback {
+		return all
+	}
 	if m.opts.dedup {
 		all = filterDuplicates(all)
 	}
@@ -317,31 +358,34 @@ func playbackGroupKey(it item) string {
 	if it.node == nil || it.node.Class != pw.Playback || it.node.JACK {
 		return ""
 	}
-	pid := it.node.Props["application.process.id"]
-	if pid == "" {
-		return ""
-	}
-	return "pid:" + pid
+	return it.node.Props["application.process.id"]
 }
 
 // groupPlaybackItems groups multiple playback streams from the same application
 // so they appear together under a single application header.
 func groupPlaybackItems(items []item) []item {
+	hasGroups := false
+scan:
+	for i := range items {
+		ki := playbackGroupKey(items[i])
+		if ki == "" {
+			continue
+		}
+		for j := i + 1; j < len(items); j++ {
+			if playbackGroupKey(items[j]) == ki {
+				hasGroups = true
+				break scan
+			}
+		}
+	}
+	if !hasGroups {
+		return items
+	}
 	counts := make(map[string]int)
 	for _, it := range items {
 		if k := playbackGroupKey(it); k != "" {
 			counts[k]++
 		}
-	}
-	hasGroups := false
-	for _, c := range counts {
-		if c > 1 {
-			hasGroups = true
-			break
-		}
-	}
-	if !hasGroups {
-		return items
 	}
 
 	groupItems := make(map[string][]item)
@@ -450,14 +494,20 @@ func (m *mixer) toggleGroupMute(groupKey string) {
 // filterDuplicates returns items without mono playback streams that duplicate
 // a multi-channel stream from the same application or media.
 func filterDuplicates(items []item) []item {
-	var filtered []item
-	for _, it := range items {
-		if isDuplicate(it, items) {
+	for i, it := range items {
+		if !isDuplicate(it, items) {
 			continue
 		}
-		filtered = append(filtered, it)
+		filtered := make([]item, 0, len(items)-1)
+		filtered = append(filtered, items[:i]...)
+		for _, rest := range items[i+1:] {
+			if !isDuplicate(rest, items) {
+				filtered = append(filtered, rest)
+			}
+		}
+		return filtered
 	}
-	return filtered
+	return items
 }
 
 func isDuplicate(it item, items []item) bool {
@@ -525,16 +575,18 @@ func (m *mixer) setFocus(items []item, i, channel int) {
 	}
 }
 
-// refocus fixes up focus, menu, drag and scrolling after the items
-// changed.
-func (m *mixer) refocus() {
-	for t := range tabCount {
-		items := m.items(t)
-		if i := m.focusIndex(t, items); i >= 0 {
-			f := &m.focus[t]
-			f.channel = min(f.channel, max(items[i].channels()-1, 0))
-		}
+func (m *mixer) refocusTab(t tab, items []item) {
+	if i := m.focusIndex(t, items); i >= 0 {
+		f := &m.focus[t]
+		f.channel = min(f.channel, max(items[i].channels()-1, 0))
 	}
+}
+
+// refocus fixes up focus, menu, drag and scrolling after the items
+// changed, and returns the current tab's items.
+func (m *mixer) refocus() []item {
+	items := m.items(m.tab)
+	m.refocusTab(m.tab, items)
 	if m.menu != nil && !m.exists(m.menu.target) {
 		m.menu = nil
 	}
@@ -548,7 +600,11 @@ func (m *mixer) refocus() {
 			m.soloSaved = nil
 			m.soloTitle = ""
 		} else {
-			for _, it := range m.items(tabPlayback) {
+			pbItems := items
+			if m.tab != tabPlayback {
+				pbItems = m.items(tabPlayback)
+			}
+			for _, it := range pbItems {
 				if it.id == m.soloID {
 					m.soloTitle = it.title()
 					break
@@ -568,7 +624,8 @@ func (m *mixer) refocus() {
 			}
 		}
 	}
-	m.scroll()
+	m.scrollItems(items)
+	return items
 }
 
 func (m *mixer) restoreSoloMutes() {
@@ -774,8 +831,11 @@ func (m *mixer) choose() {
 
 func (m *mixer) setTab(t tab) {
 	m.tab = t
+	m.flushDrag(true)
 	m.drag = nil
-	m.scroll()
+	items := m.items(t)
+	m.refocusTab(t, items)
+	m.scrollItems(items)
 }
 
 func (m *mixer) togglePlayPause() command {

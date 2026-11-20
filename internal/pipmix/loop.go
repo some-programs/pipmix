@@ -90,16 +90,23 @@ func run(ctx context.Context, m *mixer) error {
 				m.setSize(ev.Width, ev.Height)
 				m.watchMeters()
 				sized = true
+				full = true
 			case tui.KeyEvent:
 				exec(m.handleKey(string(ev)))
 				m.watchMeters()
+				full = true
 			case tui.MouseEvent:
-				exec(m.handleMouse(ev))
-				m.watchMeters()
+				if ev.Kind == tui.MouseMotion {
+					m.dragTo(ev)
+				} else {
+					exec(m.handleMouse(ev))
+					m.watchMeters()
+					full = true
+				}
 			default:
 				exec(m.update(ev))
+				full = true
 			}
-			full = true
 		case msg := <-msgs:
 			if _, ok := msg.(quitMsg); ok {
 				return nil
@@ -111,6 +118,7 @@ func run(ctx context.Context, m *mixer) error {
 			meters = true
 		case <-frameC:
 			frameC = nil
+			m.flushDrag(false)
 		}
 
 		if m.ticking != (tickC != nil) {
@@ -122,23 +130,26 @@ func run(ctx context.Context, m *mixer) error {
 				tickC = nil
 			}
 		}
-		if !sized || !full && !meters || frameC != nil {
-			continue
+		if sized && (full || meters) && frameC == nil {
+			if wait := frame - time.Since(drawn); wait > 0 {
+				timer.Reset(wait)
+				frameC = timer.C
+			} else {
+				if full {
+					m.draw(grid)
+				} else {
+					m.drawMeters(grid)
+				}
+				full, meters = false, false
+				drawn = time.Now()
+				if err := screen.Flush(grid); err != nil {
+					return err
+				}
+			}
 		}
-		if wait := frame - time.Since(drawn); wait > 0 {
-			timer.Reset(wait)
+		if m.drag != nil && m.drag.last != m.drag.sent && frameC == nil {
+			timer.Reset(max(m.dragInterval()-time.Since(m.drag.sentAt), time.Millisecond))
 			frameC = timer.C
-			continue
-		}
-		if full {
-			m.draw(grid)
-		} else {
-			m.drawMeters(grid)
-		}
-		full, meters = false, false
-		drawn = time.Now()
-		if err := screen.Flush(grid); err != nil {
-			return err
 		}
 	}
 }

@@ -73,12 +73,22 @@ func (m *mixer) nextMeter() command {
 	}
 }
 
+func (m *mixer) metersOff() bool {
+	return m.help || m.blurred && m.opts.meters != metersAlways || m.metersHidden
+}
+
 // meterTargets returns the visible nodes that can be metered.
 func (m *mixer) meterTargets() map[uint32]pulse.Target {
-	if m.help || m.blurred && m.opts.meters != metersAlways || m.metersHidden {
+	if m.metersOff() {
 		return nil
 	}
-	items := m.items(m.tab)
+	return m.meterTargetsItems(m.items(m.tab))
+}
+
+func (m *mixer) meterTargetsItems(items []item) map[uint32]pulse.Target {
+	if m.metersOff() {
+		return nil
+	}
 	h := m.listHeight()
 	total := 0
 	for _, it := range items {
@@ -134,7 +144,18 @@ func (m *mixer) watchMeters() {
 	if m.meter == nil {
 		return
 	}
-	targets := m.meterTargets()
+	if m.metersOff() {
+		m.watchMetersItems(nil)
+		return
+	}
+	m.watchMetersItems(m.items(m.tab))
+}
+
+func (m *mixer) watchMetersItems(items []item) {
+	if m.meter == nil {
+		return
+	}
+	targets := m.meterTargetsItems(items)
 	if maps.EqualFunc(targets, m.watched, pulse.Target.Equal) {
 		return
 	}

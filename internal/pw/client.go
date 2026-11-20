@@ -200,7 +200,13 @@ func (c *Client) session(ctx context.Context) error {
 				m = <-msgs
 			}
 		case f := <-c.cmds:
-			f(s)
+			for {
+				f(s)
+				if len(c.cmds) == 0 || s.err != nil {
+					break
+				}
+				f = <-c.cmds
+			}
 		case <-expired:
 			s.dirty = true
 		}

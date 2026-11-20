@@ -83,7 +83,21 @@ func (m *mixer) itemLines(it item) []itemLine {
 	return lines
 }
 
-func (m *mixer) itemHeight(it item) int { return len(m.itemLines(it)) }
+func (m *mixer) itemHeight(it item) int {
+	n := 0
+	if it.groupCount <= 1 || it.groupLeader {
+		n++
+	}
+	switch {
+	case it.card != nil:
+		n += 2
+	case it.channels() == 0, m.folded(it):
+		n++
+	default:
+		n += it.channels()
+	}
+	return n
+}
 
 // folded reports whether an item's channels show as one line: they are
 // linked (locked) and show the same volume.
@@ -116,8 +130,9 @@ func foldedName(chans []pw.Channel) string {
 }
 
 // scroll adjusts the current tab's scroll offset so the focused item is visible.
-func (m *mixer) scroll() {
-	items := m.items(m.tab)
+func (m *mixer) scroll() { m.scrollItems(m.items(m.tab)) }
+
+func (m *mixer) scrollItems(items []item) {
 	i := m.focusIndex(m.tab, items)
 	off := &m.offset[m.tab]
 	if i < 0 {
@@ -147,16 +162,18 @@ type tabSpan struct {
 
 const tabGap = 2
 
-func tabSpans() []tabSpan {
-	var spans []tabSpan
+var cachedTabSpans = func() [tabCount]tabSpan {
+	var spans [tabCount]tabSpan
 	x := 0
 	for t := range tabCount {
 		w := ansi.StringWidth(tabNames[t])
-		spans = append(spans, tabSpan{t, x, x + w})
+		spans[t] = tabSpan{t, x, x + w}
 		x += w + tabGap
 	}
 	return spans
-}
+}()
+
+func tabSpans() []tabSpan { return cachedTabSpans[:] }
 
 // meterRow is a row of the screen that shows a meter.
 type meterRow struct {
