@@ -4,63 +4,65 @@ import (
 	"slices"
 	"strings"
 
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/some-programs/pipmix/internal/tui"
 )
 
 var (
-	helpSectionStyle = lipgloss.NewStyle().Bold(true)
-	helpRuleStyle    = ansi.Style{}.Underline(true).UnderlineColor(ansi.BrightBlack)
+	helpSectionStyle = tui.Style{Attrs: tui.Bold}
+	helpRuleStyle    = tui.Style{Attrs: tui.Underline, UnderlineColor: tui.BrightBlack}
 )
 
 const helpGap = 3
 
 type helpLine struct {
-	text string
-	rule bool // underlined separator at the end of a binding
+	text  string
+	style tui.Style
+	rule  bool // underlined separator at the end of a binding
 }
 
-// helpLines formats the current tab's help into columns fitting width and height.
-func (m *mixer) helpLines(width, height int) []string {
+// helpColumns arranges the current tab's help into columns fitting width
+// and height.
+func (m *mixer) helpColumns(width, height int) [][]helpLine {
 	var blocks [][]helpLine
 	for _, s := range m.tabSections() {
 		blocks = append(blocks, helpBlock(s, width))
 	}
-	columns := arrangeColumns(blocks, width, height)
-	lines := make([]string, tallest(columns))
-	for i := range lines {
-		var b strings.Builder
-		for c, col := range columns {
-			if c > 0 {
-				b.WriteString(strings.Repeat(" ", helpGap))
-			}
-			var line helpLine
-			if i < len(col) {
-				line = col[i]
-			}
-			text := fit(line.text, columnWidth(col))
-			if line.rule {
-				text = helpRuleStyle.Styled(text)
-			}
-			b.WriteString(text)
-		}
-		lines[i] = fit(b.String(), width)
-	}
-	return lines
+	return arrangeColumns(blocks, width, height)
 }
 
 // scrollHelp scrolls the help by delta lines, within its length.
 func (m *mixer) scrollHelp(delta int) {
 	h := m.listHeight()
-	n := len(m.helpLines(m.width, h))
+	n := tallest(m.helpColumns(m.width, h))
 	m.helpOff = max(0, min(m.helpOff+delta, n-h))
 }
 
-// helpView renders the visible lines of the help.
-func (m *mixer) helpView(width, height int) []string {
-	lines := m.helpLines(width, height)
-	end := min(len(lines), m.helpOff+height)
-	return lines[min(m.helpOff, end):end]
+// drawHelp draws the visible lines of the help into the h rows of the list.
+func (m *mixer) drawHelp(g *tui.Grid, h int) {
+	columns := m.helpColumns(m.width, h)
+	widths := make([]int, len(columns))
+	for c, col := range columns {
+		widths[c] = columnWidth(col)
+	}
+	for i := m.helpOff; i < min(tallest(columns), m.helpOff+h); i++ {
+		p := g.Pen(0, listTop+i-m.helpOff, m.width)
+		for c, col := range columns {
+			if c > 0 {
+				p.Repeat(" ", helpGap, plain)
+			}
+			var line helpLine
+			if i < len(col) {
+				line = col[i]
+			}
+			st, pad := line.style, plain
+			if line.rule {
+				st, pad = helpRuleStyle, helpRuleStyle
+			}
+			p.Fit(line.text, widths[c], st, pad)
+		}
+	}
 }
 
 func tallest(columns [][]helpLine) int {
@@ -97,7 +99,7 @@ func helpBlock(s section, width int) []helpLine {
 		}
 	}
 	textIndent := len(indent) + keysWidth + 2
-	lines := []helpLine{{text: helpSectionStyle.Render(ansi.Truncate(s.title, width, "…"))}}
+	lines := []helpLine{{text: ansi.Truncate(s.title, width, "…"), style: helpSectionStyle}}
 	for _, b := range s.bindings {
 		inputs := b.inputs()
 		text := strings.Split(ansi.Wrap(b.help, max(1, width-textIndent), ""), "\n")
@@ -110,7 +112,7 @@ func helpBlock(s section, width int) []helpLine {
 			if r < len(text) {
 				line += strings.Repeat(" ", textIndent-ansi.StringWidth(line)) + text[r]
 			}
-			lines = append(lines, helpLine{ansi.Truncate(line, width, "…"), r == rows-1})
+			lines = append(lines, helpLine{text: ansi.Truncate(line, width, "…"), rule: r == rows-1})
 		}
 	}
 	return lines
@@ -159,13 +161,4 @@ func arrangeColumns(blocks [][]helpLine, width, height int) [][]helpLine {
 		}
 	}
 	return best
-}
-
-// fit truncates or pads s to width cells.
-func fit(s string, width int) string {
-	if width <= 0 {
-		return ""
-	}
-	s = ansi.Truncate(s, width, "…")
-	return s + strings.Repeat(" ", max(0, width-ansi.StringWidth(s)))
 }

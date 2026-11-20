@@ -2,15 +2,13 @@ package pipmix
 
 import (
 	"slices"
-
-	tea "charm.land/bubbletea/v2"
 )
 
 type binding struct {
 	keys  []string
 	help  string
 	mouse string
-	do    func(m *mixer) tea.Cmd
+	do    func(m *mixer) command
 }
 
 type section struct {
@@ -20,10 +18,10 @@ type section struct {
 
 func volumeKeys(o options) section {
 	return section{"Volume", []binding{
-		{[]string{"l", "right", "+", "="}, "Louder by " + percentText(o.step), "click or drag on a bar", func(m *mixer) tea.Cmd { return m.changeVolume(m.opts.step) }},
-		{[]string{"h", "left", "-"}, "Quieter by " + percentText(o.step), "", func(m *mixer) tea.Cmd { return m.changeVolume(-m.opts.step) }},
-		{[]string{"L", "shift+right"}, "Louder by " + percentText(o.fineStep), "", func(m *mixer) tea.Cmd { return m.changeVolume(m.opts.fineStep) }},
-		{[]string{"H", "shift+left"}, "Quieter by " + percentText(o.fineStep), "", func(m *mixer) tea.Cmd { return m.changeVolume(-m.opts.fineStep) }},
+		{[]string{"l", "right", "+", "="}, "Louder by " + percentText(o.step), "click or drag on a bar", func(m *mixer) command { return m.changeVolume(m.opts.step) }},
+		{[]string{"h", "left", "-"}, "Quieter by " + percentText(o.step), "", func(m *mixer) command { return m.changeVolume(-m.opts.step) }},
+		{[]string{"L", "shift+right"}, "Louder by " + percentText(o.fineStep), "", func(m *mixer) command { return m.changeVolume(m.opts.fineStep) }},
+		{[]string{"H", "shift+left"}, "Quieter by " + percentText(o.fineStep), "", func(m *mixer) command { return m.changeVolume(-m.opts.fineStep) }},
 		{[]string{"c", "u"}, "Set volume to 100%", "middle click on a bar", (*mixer).setVolume100},
 		{[]string{"m"}, "Mute or unmute", "click 🔊, or right click", (*mixer).toggleMute},
 		{[]string{"space"}, "Lock or unlock the channels", "", (*mixer).toggleLock},
@@ -59,27 +57,27 @@ func cardKeys() section {
 }
 
 func navigationKeys() section {
-	page := func(f func(n int) int) func(m *mixer) tea.Cmd {
-		return func(m *mixer) tea.Cmd {
+	page := func(f func(n int) int) func(m *mixer) command {
+		return func(m *mixer) command {
 			m.moveItems(f(m.pageItems()))
 			return nil
 		}
 	}
 	return section{"Navigation", []binding{
-		{[]string{"k", "up", "ctrl+p"}, "Move up", "click", func(m *mixer) tea.Cmd { m.move(-1); return nil }},
-		{[]string{"j", "down", "ctrl+n"}, "Move down", "", func(m *mixer) tea.Cmd { m.move(1); return nil }},
+		{[]string{"k", "up", "ctrl+p"}, "Move up", "click", func(m *mixer) command { m.move(-1); return nil }},
+		{[]string{"j", "down", "ctrl+n"}, "Move down", "", func(m *mixer) command { m.move(1); return nil }},
 		{[]string{"ctrl+b", "pgup", "alt+v"}, "Page up", "", page(func(n int) int { return -n })},
 		{[]string{"ctrl+f", "pgdown", "ctrl+v"}, "Page down", "", page(func(n int) int { return n })},
 		{[]string{"ctrl+u"}, "Half page up", "", page(func(n int) int { return -max(n/2, 1) })},
 		{[]string{"ctrl+d"}, "Half page down", "", page(func(n int) int { return max(n/2, 1) })},
-		{[]string{"g", "home"}, "Go to top", "", func(m *mixer) tea.Cmd { m.moveItems(-1 << 30); return nil }},
-		{[]string{"G", "end"}, "Go to bottom", "", func(m *mixer) tea.Cmd { m.moveItems(1 << 30); return nil }},
+		{[]string{"g", "home"}, "Go to top", "", func(m *mixer) command { m.moveItems(-1 << 30); return nil }},
+		{[]string{"G", "end"}, "Go to bottom", "", func(m *mixer) command { m.moveItems(1 << 30); return nil }},
 	}}
 }
 
 func tabKeys() section {
-	set := func(f func(tab) tab) func(m *mixer) tea.Cmd {
-		return func(m *mixer) tea.Cmd {
+	set := func(f func(tab) tab) func(m *mixer) command {
+		return func(m *mixer) command {
 			m.setTab(f(m.tab))
 			return nil
 		}
@@ -102,7 +100,7 @@ func tabKeys() section {
 
 func generalKeys() section {
 	return section{"General", []binding{
-		{[]string{"?"}, "Help for this tab", "", func(m *mixer) tea.Cmd {
+		{[]string{"?"}, "Help for this tab", "", func(m *mixer) command {
 			m.help, m.helpOff = true, 0
 			return nil
 		}},
@@ -113,24 +111,24 @@ func generalKeys() section {
 
 func menuKeys() section {
 	return section{"Menu", []binding{
-		{[]string{"k", "up", "ctrl+p"}, "Move up", "wheel", func(m *mixer) tea.Cmd { m.moveMenu(-1); return nil }},
-		{[]string{"j", "down", "ctrl+n"}, "Move down", "", func(m *mixer) tea.Cmd { m.moveMenu(1); return nil }},
-		{[]string{"g", "home"}, "Go to top", "", func(m *mixer) tea.Cmd { m.moveMenu(-len(m.menu.items)); return nil }},
-		{[]string{"G", "end"}, "Go to bottom", "", func(m *mixer) tea.Cmd { m.moveMenu(len(m.menu.items)); return nil }},
-		{[]string{"enter", "space"}, "Choose", "click", func(m *mixer) tea.Cmd { m.choose(); return nil }},
-		{[]string{"esc", "q"}, "Close", "click outside", func(m *mixer) tea.Cmd { m.menu = nil; return nil }},
+		{[]string{"k", "up", "ctrl+p"}, "Move up", "wheel", func(m *mixer) command { m.moveMenu(-1); return nil }},
+		{[]string{"j", "down", "ctrl+n"}, "Move down", "", func(m *mixer) command { m.moveMenu(1); return nil }},
+		{[]string{"g", "home"}, "Go to top", "", func(m *mixer) command { m.moveMenu(-len(m.menu.items)); return nil }},
+		{[]string{"G", "end"}, "Go to bottom", "", func(m *mixer) command { m.moveMenu(len(m.menu.items)); return nil }},
+		{[]string{"enter", "space"}, "Choose", "click", func(m *mixer) command { m.choose(); return nil }},
+		{[]string{"esc", "q"}, "Close", "click outside", func(m *mixer) command { m.menu = nil; return nil }},
 	}}
 }
 
 func helpScreenKeys() section {
 	return section{"Help", []binding{
-		{[]string{"?", "q", "esc"}, "Close help", "", func(m *mixer) tea.Cmd { m.help = false; return nil }},
-		{[]string{"k", "up", "ctrl+p"}, "Scroll up", "wheel", func(m *mixer) tea.Cmd { m.scrollHelp(-1); return nil }},
-		{[]string{"j", "down", "ctrl+n"}, "Scroll down", "", func(m *mixer) tea.Cmd { m.scrollHelp(1); return nil }},
-		{[]string{"ctrl+b", "pgup", "alt+v"}, "Page up", "", func(m *mixer) tea.Cmd { m.scrollHelp(-m.listHeight()); return nil }},
-		{[]string{"ctrl+f", "pgdown", "ctrl+v"}, "Page down", "", func(m *mixer) tea.Cmd { m.scrollHelp(m.listHeight()); return nil }},
-		{[]string{"g", "home"}, "Go to top", "", func(m *mixer) tea.Cmd { m.scrollHelp(-1 << 30); return nil }},
-		{[]string{"G", "end"}, "Go to bottom", "", func(m *mixer) tea.Cmd { m.scrollHelp(1 << 30); return nil }},
+		{[]string{"?", "q", "esc"}, "Close help", "", func(m *mixer) command { m.help = false; return nil }},
+		{[]string{"k", "up", "ctrl+p"}, "Scroll up", "wheel", func(m *mixer) command { m.scrollHelp(-1); return nil }},
+		{[]string{"j", "down", "ctrl+n"}, "Scroll down", "", func(m *mixer) command { m.scrollHelp(1); return nil }},
+		{[]string{"ctrl+b", "pgup", "alt+v"}, "Page up", "", func(m *mixer) command { m.scrollHelp(-m.listHeight()); return nil }},
+		{[]string{"ctrl+f", "pgdown", "ctrl+v"}, "Page down", "", func(m *mixer) command { m.scrollHelp(m.listHeight()); return nil }},
+		{[]string{"g", "home"}, "Go to top", "", func(m *mixer) command { m.scrollHelp(-1 << 30); return nil }},
+		{[]string{"G", "end"}, "Go to bottom", "", func(m *mixer) command { m.scrollHelp(1 << 30); return nil }},
 	}}
 }
 
@@ -173,7 +171,7 @@ func (m *mixer) sections() []section {
 	return m.tabSections()
 }
 
-func (m *mixer) handleKey(key string) tea.Cmd {
+func (m *mixer) handleKey(key string) command {
 	for _, s := range m.sections() {
 		for _, b := range s.bindings {
 			if slices.Contains(b.keys, key) {

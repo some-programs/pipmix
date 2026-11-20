@@ -7,12 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
-
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/some-programs/pipmix/internal/mpris"
 	"github.com/some-programs/pipmix/internal/pw"
+	"github.com/some-programs/pipmix/internal/tui"
 )
 
 func stereo(v float64) []pw.Channel {
@@ -219,11 +218,11 @@ func TestDefaultFirst(t *testing.T) {
 
 func TestQuitKeysAndLayers(t *testing.T) {
 	m := testMixer()
-	isQuit := func(cmd tea.Cmd) bool {
+	isQuit := func(cmd command) bool {
 		if cmd == nil {
 			return false
 		}
-		_, ok := cmd().(tea.QuitMsg)
+		_, ok := cmd().(quitMsg)
 		return ok
 	}
 	m.handleKey("?")
@@ -295,22 +294,22 @@ func TestMouse(t *testing.T) {
 
 	// Rows: 0 tabs, then Player A at 1-2 (title, FL+FR folded), Player B
 	// at 3-4.
-	click := func(x, y int, b tea.MouseButton) {
-		m.handleMouse(tea.MouseClickMsg{X: x, Y: y, Button: b})
+	click := func(x, y int, b ansi.MouseButton) {
+		m.handleMouse(tui.MouseEvent{Kind: tui.MouseClick, X: x, Y: y, Button: b})
 	}
-	click(4, 3, tea.MouseLeft)
+	click(4, 3, tui.MouseLeft)
 	if id := focusedID(&m); id != 11 {
 		t.Fatalf("click on Player B's title: focus %d", id)
 	}
-	click(barX+5, 2, tea.MouseLeft)
+	click(barX+5, 2, tui.MouseLeft)
 	if id := focusedID(&m); id != 10 || m.drag == nil || m.drag.node != 10 || m.drag.channel != -1 {
 		t.Fatalf("click on Player A's bar: focus %d, drag %+v", id, m.drag)
 	}
-	m.handleMouse(tea.MouseMotionMsg{X: barX + 20, Y: 2, Button: tea.MouseLeft})
+	m.handleMouse(tui.MouseEvent{Kind: tui.MouseMotion, X: barX + 20, Y: 2, Button: tui.MouseLeft})
 	if want := m.volumeAt(barX + 20); m.drag.last != want {
 		t.Errorf("drag: last %v, want %v", m.drag.last, want)
 	}
-	m.handleMouse(tea.MouseReleaseMsg{X: barX + 20, Y: 2, Button: tea.MouseLeft})
+	m.handleMouse(tui.MouseEvent{Kind: tui.MouseRelease, X: barX + 20, Y: 2, Button: tui.MouseLeft})
 	if m.drag != nil {
 		t.Error("release didn't end the drag")
 	}
@@ -326,16 +325,16 @@ func TestMouse(t *testing.T) {
 
 	// A tab.
 	spans := tabSpans()
-	click(spans[tabCards].start, 0, tea.MouseLeft)
+	click(spans[tabCards].start, 0, tui.MouseLeft)
 	if m.tab != tabCards {
 		t.Fatalf("click on the Cards tab: tab %d", m.tab)
 	}
 	// The profile line opens the menu; a click outside closes it.
-	click(5, 2, tea.MouseLeft)
+	click(5, 2, tui.MouseLeft)
 	if m.menu == nil || m.menu.kind != menuProfile {
 		t.Fatalf("click on the profile line: menu %+v", m.menu)
 	}
-	click(0, m.height-1, tea.MouseLeft)
+	click(0, m.height-1, tui.MouseLeft)
 	if m.menu != nil {
 		t.Error("click outside didn't close the menu")
 	}
@@ -344,7 +343,7 @@ func TestMouse(t *testing.T) {
 func TestWheelPullsFocus(t *testing.T) {
 	m := testMixer()
 	m.setSize(60, 4) // three rows: room for one item of two lines
-	m.handleMouse(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	m.handleMouse(tui.MouseEvent{Kind: tui.MouseWheel, Button: tui.MouseWheelDown})
 	if id := focusedID(&m); id != 12 {
 		t.Errorf("after scrolling 3 lines: focus %d, want 12, the only item fully on screen", id)
 	}
@@ -364,9 +363,9 @@ func TestFold(t *testing.T) {
 		}
 		return out
 	}
-	raw := m.view()
-	if !strings.Contains(raw, boldStyle.Render("FL+FR")) || !strings.Contains(raw, boldStyle.Render(" 50")) {
-		t.Errorf("focused folded channel name or volume not bold:\n%s", raw)
+	g := drawGrid(&m)
+	if x, y, ok := find(g, "FL+FR  50"); !ok || g.At(x, y).Style != boldStyle || g.At(x+8, y).Style != boldStyle {
+		t.Errorf("focused folded channel name or volume not bold:\n%s", g)
 	}
 	if got := lines(); len(got) != 3 || !strings.HasPrefix(got[0], "█        FL+FR  50") {
 		t.Fatalf("folded lines = %q", got)
@@ -393,7 +392,7 @@ func TestFold(t *testing.T) {
 	s = testSnapshot()
 	m.snap = s
 	m.refocus()
-	m.handleMouse(tea.MouseClickMsg{X: 4, Y: 4, Button: tea.MouseLeft})
+	m.handleMouse(tui.MouseEvent{Kind: tui.MouseClick, X: 4, Y: 4, Button: tui.MouseLeft})
 	if id := focusedID(&m); id != 11 {
 		t.Errorf("click on Player B's folded line: focus %d", id)
 	}
@@ -443,11 +442,11 @@ func TestTitleColumns(t *testing.T) {
 	if !ok || end-start != ansi.StringWidth("Headphones ▾") || col(speakers, "Headphones") != start {
 		t.Fatalf("port span %d-%d %v", start, end, ok)
 	}
-	m.handleMouse(tea.MouseClickMsg{X: 8, Y: 1, Button: tea.MouseLeft})
+	m.handleMouse(tui.MouseEvent{Kind: tui.MouseClick, X: 8, Y: 1, Button: tui.MouseLeft})
 	if m.menu != nil {
 		t.Fatal("click on the title opened a menu")
 	}
-	m.handleMouse(tea.MouseClickMsg{X: start, Y: 1, Button: tea.MouseLeft})
+	m.handleMouse(tui.MouseEvent{Kind: tui.MouseClick, X: start, Y: 1, Button: tui.MouseLeft})
 	if m.menu == nil || m.menu.kind != menuRoute {
 		t.Errorf("click on the port: menu %+v", m.menu)
 	}
@@ -510,12 +509,12 @@ func TestTypeStrip(t *testing.T) {
 		pw.Node{ID: 40, Class: pw.Recording, Name: "rec", Title: "Recorder", Channels: stereo(1)})
 	m.snap = s
 	m.refocus()
-	strip := func(c pw.Class) string { return classStripStyles[c].Render(typeStripBar) }
-	card := cardStripStyle.Render(typeStripBar)
+	strip := func(c pw.Class) tui.Style { return classStripStyles[c] }
+	card := cardStripStyle
 	for _, tc := range []struct {
 		tab   tab
 		id    uint32
-		strip string
+		strip tui.Style
 	}{
 		{tabDefault, 20, strip(pw.Sink)},
 		{tabDefault, 10, strip(pw.Playback)},
@@ -534,19 +533,21 @@ func TestTypeStrip(t *testing.T) {
 			found = true
 			layout := m.tabLayout(tc.tab)
 			for _, focused := range []bool{false, true} {
-				lines := m.renderItem(it, focused, layout)
-				if strings.Contains(lines[0], focusTitleStyle.Render(it.title())) != focused {
-					t.Errorf("tab %s, item %d, focused %v: title line %q, want the name bold and underlined only when focused", tabNames[tc.tab], tc.id, focused, lines[0])
+				itemLines := m.itemLines(it)
+				g := tui.NewGrid(m.width, len(itemLines))
+				for y, l := range itemLines {
+					m.drawLine(g, y, it, l, focused, layout)
 				}
-				for i, l := range lines {
-					if l == "" {
+				x, y, ok := find(g, it.title())
+				if titleFocused := ok && y == 0 && g.At(x, y).Style == focusTitleStyle; titleFocused != focused {
+					t.Errorf("tab %s, item %d, focused %v: title line %q, want the name bold and underlined only when focused", tabNames[tc.tab], tc.id, focused, g)
+				}
+				for i, l := range lines(g) {
+					if strings.TrimSpace(l) == "" {
 						continue
 					}
-					if !strings.HasPrefix(l, " "+tc.strip) {
-						t.Errorf("tab %s, item %d, focused %v, line %d: %q, want it to start %q", tabNames[tc.tab], tc.id, focused, i, l, " "+tc.strip)
-					}
-					if w := ansi.StringWidth(l); w != m.width {
-						t.Errorf("tab %s, item %d, line %d is %d wide, want %d", tabNames[tc.tab], tc.id, i, w, m.width)
+					if c := g.At(1, i); !strings.HasPrefix(l, " "+typeStripBar) || c.Style != tc.strip {
+						t.Errorf("tab %s, item %d, focused %v, line %d: %q in %+v, want it to start %q in %+v", tabNames[tc.tab], tc.id, focused, i, l, c.Style, " "+typeStripBar, tc.strip)
 					}
 				}
 			}
@@ -596,7 +597,7 @@ func TestJACKClient(t *testing.T) {
 		}
 	}
 	for _, pt := range []struct{ x, y int }{{muteX, 7}, {barX + 2, 8}} {
-		cmd := m.click(tea.Mouse{X: pt.x, Y: pt.y, Button: tea.MouseLeft})
+		cmd := m.click(tui.MouseEvent{X: pt.x, Y: pt.y, Button: tui.MouseLeft})
 		if cmd == nil {
 			t.Fatalf("click at (%d,%d): no notice", pt.x, pt.y)
 		}
@@ -631,11 +632,11 @@ func TestMediaTitlesAndControls(t *testing.T) {
 		t.Errorf("recording title %q", it.title())
 	}
 
-	raw := m.view()
-	if !strings.Contains(raw, focusStyle.Bold(true).Render(symPause)) {
-		t.Errorf("focused toolbar button should be cyan bold:\n%s", raw)
+	g := drawGrid(&m)
+	if st, ok := styleOf(g, symPause); !ok || st != (tui.Style{Fg: tui.Cyan, Attrs: tui.Bold}) {
+		t.Errorf("focused toolbar button should be cyan bold:\n%s", g)
 	}
-	view := ansi.Strip(raw)
+	view := ansi.Strip(g.String())
 	if !strings.Contains(view, symSpeaker+" "+symPause) || !strings.Contains(view, "Player: Track 1") {
 		t.Errorf("view with playing player: %q", view)
 	}
@@ -647,7 +648,7 @@ func TestMediaTitlesAndControls(t *testing.T) {
 	}
 
 	m.media = mpris.NewWatcher(nil)
-	if cmd := m.click(tea.Mouse{X: playX, Y: 1, Button: tea.MouseLeft}); cmd == nil {
+	if cmd := m.click(tui.MouseEvent{X: playX, Y: 1, Button: tui.MouseLeft}); cmd == nil {
 		t.Fatal("click on play/pause button returned nil cmd")
 	}
 

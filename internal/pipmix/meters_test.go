@@ -7,11 +7,9 @@ import (
 	"testing"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/x/ansi"
-
 	"github.com/some-programs/pipmix/internal/pulse"
 	"github.com/some-programs/pipmix/internal/pw"
+	"github.com/some-programs/pipmix/internal/tui"
 )
 
 func meterSnapshot() *pw.Snapshot {
@@ -208,11 +206,11 @@ func TestLevels(t *testing.T) {
 func TestMeterFocus(t *testing.T) {
 	m := testMixer()
 	m.snap = meterSnapshot()
-	m.update(tea.BlurMsg{})
+	m.update(tui.BlurEvent{})
 	if got := m.meterTargets(); len(got) != 0 {
 		t.Errorf("targets while not focused %v, want none", targetKeys(got))
 	}
-	m.update(tea.FocusMsg{})
+	m.update(tui.FocusEvent{})
 	if got := m.meterTargets(); len(got) == 0 {
 		t.Error("no targets once focused again")
 	}
@@ -234,7 +232,8 @@ func TestBarLevel(t *testing.T) {
 		{1, 0.3, 0.7, false, meterSolid, "███▓▓▓█▓▓▓█░░░░░"},
 		{1, 0.5, 0, true, meterSolid, "▓▓▓▓▓▓▓▓▓▓█░░░░░"},
 	} {
-		if got := ansi.Strip(bar(tc.v, tc.level, tc.peak, 16, 1.5, tc.muted, tc.look)); got != tc.want {
+		got := penText(16, func(p *tui.Pen) { drawBar(p, tc.v, tc.level, tc.peak, 16, 1.5, tc.muted, tc.look) })
+		if got != tc.want {
 			t.Errorf("bar(%v, %v, %v, 16, %v, look %d) = %q, want %q", tc.v, tc.level, tc.peak, tc.muted, tc.look, got, tc.want)
 		}
 	}
@@ -248,7 +247,8 @@ func TestBarLevel(t *testing.T) {
 		{0.5, 0, meterDot, "░░░░█░░░░░░░░░░░"},
 		{0.5, 0.7, meterOff, "░░░░░░░░░░░░░░░░"},
 	} {
-		if got := ansi.Strip(meterBar(tc.level, tc.peak, 16, 1.5, tc.look)); got != tc.want {
+		got := penText(16, func(p *tui.Pen) { drawMeterBar(p, tc.level, tc.peak, 16, 1.5, tc.look) })
+		if got != tc.want {
 			t.Errorf("meterBar(%v, %v, 16, look %d) = %q, want %q", tc.level, tc.peak, tc.look, got, tc.want)
 		}
 	}
@@ -293,7 +293,7 @@ func TestMeterWaitOnce(t *testing.T) {
 	m.meter = pulse.NewMeter(nil, 0)
 	m.meterWaiting = true // as after init
 
-	for _, msg := range []tea.Msg{tea.BlurMsg{}, tea.FocusMsg{}} {
+	for _, msg := range []message{tui.BlurEvent{}, tui.FocusEvent{}} {
 		if cmd := m.update(msg); cmd != nil {
 			t.Errorf("%T with a wait pending: got a command, want none", msg)
 		}
@@ -302,7 +302,7 @@ func TestMeterWaitOnce(t *testing.T) {
 	if cmd := m.update(meterMsg{}); cmd == nil || !m.meterWaiting {
 		t.Fatal("snapshot with settled levels: no new wait")
 	}
-	if cmd := m.update(tea.FocusMsg{}); cmd != nil {
+	if cmd := m.update(tui.FocusEvent{}); cmd != nil {
 		t.Error("focus after the new wait: got a command, want none")
 	}
 }

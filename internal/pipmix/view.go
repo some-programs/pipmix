@@ -5,25 +5,25 @@ import (
 	"math"
 	"strings"
 
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/some-programs/pipmix/internal/pw"
+	"github.com/some-programs/pipmix/internal/tui"
 )
 
 var (
-	tabStyle        = lipgloss.NewStyle()
-	activeTabStyle  = lipgloss.NewStyle().Reverse(true).Bold(true)
-	dimStyle        = lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
-	boldStyle       = lipgloss.NewStyle().Bold(true)
-	focusStyle      = lipgloss.NewStyle().Foreground(lipgloss.Cyan)
-	focusTitleStyle = lipgloss.NewStyle().Bold(true).Underline(true)
-	defaultTagStyle = lipgloss.NewStyle().Foreground(lipgloss.Cyan)
-	errorStyle      = lipgloss.NewStyle().Foreground(lipgloss.Red).Bold(true)
-	barFullStyle    = lipgloss.NewStyle().Foreground(lipgloss.Green)
-	barOverStyle    = lipgloss.NewStyle().Foreground(lipgloss.Red)
-	menuCursorStyle = lipgloss.NewStyle().Reverse(true)
-	menuBoxStyle    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+	plain           = tui.Style{}
+	tabStyle        = tui.Style{}
+	activeTabStyle  = tui.Style{Attrs: tui.Reverse | tui.Bold}
+	dimStyle        = tui.Style{Fg: tui.BrightBlack}
+	boldStyle       = tui.Style{Attrs: tui.Bold}
+	focusStyle      = tui.Style{Fg: tui.Cyan}
+	focusTitleStyle = tui.Style{Attrs: tui.Bold | tui.Underline}
+	defaultTagStyle = tui.Style{Fg: tui.Cyan}
+	errorStyle      = tui.Style{Fg: tui.Red, Attrs: tui.Bold}
+	barFullStyle    = tui.Style{Fg: tui.Green}
+	barOverStyle    = tui.Style{Fg: tui.Red}
+	menuCursorStyle = tui.Style{Attrs: tui.Reverse}
 )
 
 const (
@@ -39,7 +39,7 @@ func (m *mixer) innerWidth() int { return m.width - contentX - 2 }
 
 func (m *mixer) listHeight() int {
 	h := m.height - 1
-	if m.statusLine() != "" {
+	if m.status() != nil {
 		h--
 	}
 	return max(h, 0)
@@ -158,79 +158,142 @@ func tabSpans() []tabSpan {
 	return spans
 }
 
-func (m *mixer) view() string {
-	if m.width <= 0 || m.height <= 0 {
-		return ""
-	}
-	lines := []string{m.tabBar()}
-	h := m.listHeight()
-	var list []string
-	if m.help {
-		list = m.helpView(m.width, h)
-	} else {
-		layout := m.tabLayout(m.tab)
-		for i, it := range layout.items {
-			list = append(list, m.renderItem(it, i == layout.focus, layout)...)
-		}
-		if len(layout.items) == 0 && m.snap.Connected {
-			list = []string{dimStyle.Render(" Nothing here")}
-		}
-		off := min(m.offset[m.tab], max(len(list)-h, 0))
-		list = list[off:]
-	}
-	list = list[:min(len(list), h)]
-	for len(list) < h {
-		list = append(list, "")
-	}
-	lines = append(lines, list...)
-	if status := m.statusLine(); status != "" && m.height > 1 {
-		lines = append(lines, fit(status, m.width))
-	}
-	content := strings.Join(lines, "\n")
-	if m.menu != nil {
-		box, x, y := m.menuBox()
-		content = overlay(content, box, x, y)
-	}
-	return content
+// meterRow is a row of the screen that shows a meter.
+type meterRow struct {
+	y       int
+	it      item
+	channel int
 }
 
-func (m *mixer) tabBar() string {
-	var b strings.Builder
+// draw draws the whole screen into g, resizing it to the mixer, and notes
+// the rows that show meters for [mixer.drawMeters].
+func (m *mixer) draw(g *tui.Grid) {
+	if w, h := g.Size(); w != m.width || h != m.height {
+		g.Resize(m.width, m.height)
+	} else {
+		g.Clear()
+	}
+	m.meterRows = m.meterRows[:0]
+	if m.width <= 0 || m.height <= 0 {
+		return
+	}
+	m.drawTabBar(g)
+	h := m.listHeight()
+	if m.help {
+		m.drawHelp(g, h)
+	} else {
+		m.drawList(g, h)
+	}
+	if status := m.status(); status != nil && m.height > 1 {
+		p := g.Pen(0, listTop+h, m.width)
+		for _, s := range status {
+			p.Text(s.text, s.style)
+		}
+	}
+	if m.menu != nil {
+		m.drawMenu(g)
+	}
+}
+
+// drawMeters redraws the meters that the last [mixer.draw] drew, which
+// must be the only change since.
+func (m *mixer) drawMeters(g *tui.Grid) {
+	if m.menu != nil {
+		// The menu may cover meters.
+		m.draw(g)
+		return
+	}
+	w := m.barWidth()
+	for _, r := range m.meterRows {
+		p := g.Pen(barX, r.y, barX+w)
+		m.drawChannelBar(&p, r.it, r.channel)
+	}
+}
+
+// view draws the screen and returns it as lines.
+func (m *mixer) view() string {
+	g := tui.NewGrid(m.width, m.height)
+	m.draw(g)
+	return g.String()
+}
+
+func (m *mixer) drawTabBar(g *tui.Grid) {
+	p := g.Pen(0, 0, m.width)
+	p.AddAttrs(tui.Underline)
 	for _, s := range tabSpans() {
 		style := tabStyle
 		if s.tab == m.tab {
 			style = activeTabStyle
 		}
-		b.WriteString(style.Render(tabNames[s.tab]) + strings.Repeat(" ", tabGap))
+		p.Text(tabNames[s.tab], style)
+		p.Repeat(" ", tabGap, plain)
 	}
-	return underlineRow(b.String(), m.width)
+	p.Pad(plain)
 }
 
-func underlineRow(s string, width int) string {
-	const underline = "\x1b[4m"
-	s = fit(s, width)
-	for _, reset := range []string{"\x1b[m", "\x1b[0m"} {
-		s = strings.ReplaceAll(s, reset, reset+underline)
+func (m *mixer) drawList(g *tui.Grid, h int) {
+	layout := m.tabLayout(m.tab)
+	if len(layout.items) == 0 {
+		if m.snap.Connected && h > 0 {
+			p := g.Pen(0, listTop, m.width)
+			p.Text(" Nothing here", dimStyle)
+		}
+		return
 	}
-	return underline + s + ansi.ResetStyle
+	if m.width < contentX+2 {
+		return
+	}
+	lines := make([][]itemLine, len(layout.items))
+	total := 0
+	for i, it := range layout.items {
+		lines[i] = m.itemLines(it)
+		total += len(lines[i])
+	}
+	y := listTop - min(m.offset[m.tab], max(total-h, 0))
+	for i, it := range layout.items {
+		for _, l := range lines[i] {
+			if y >= listTop+h {
+				return
+			}
+			if y >= listTop {
+				m.drawLine(g, y, it, l, i == layout.focus, layout)
+			}
+			y++
+		}
+	}
 }
 
-func (m *mixer) statusLine() string {
+type span struct {
+	text  string
+	style tui.Style
+}
+
+// status returns the status line, or nil if there is none.
+func (m *mixer) status() []span {
 	switch {
 	case !m.snap.Connected && m.snap.Err != nil:
-		return errorStyle.Render(fmt.Sprintf("PipeWire: %v; reconnecting", m.snap.Err))
+		return []span{{fmt.Sprintf("PipeWire: %v; reconnecting", m.snap.Err), errorStyle}}
 	case !m.snap.Connected:
-		return "Connecting to PipeWire"
+		return []span{{"Connecting to PipeWire", plain}}
 	case m.notice != "" && m.noticeErr:
-		return errorStyle.Render(m.notice)
+		return []span{{m.notice, errorStyle}}
 	case m.soloID != 0 && m.notice != "":
-		return defaultTagStyle.Render("[SOLO] ") + m.soloTitle + "  " + m.notice
+		return []span{{"[SOLO] ", defaultTagStyle}, {m.soloTitle + "  " + m.notice, plain}}
 	case m.soloID != 0:
-		return defaultTagStyle.Render("[SOLO] ") + m.soloTitle
+		return []span{{"[SOLO] ", defaultTagStyle}, {m.soloTitle, plain}}
 	case m.notice != "":
-		return m.notice
+		return []span{{m.notice, plain}}
 	}
-	return ""
+	return nil
+}
+
+// statusLine returns the text of the status line.
+func (m *mixer) statusLine() string {
+	var b strings.Builder
+	for _, s := range m.status() {
+		b.WriteString(s.text)
+	}
+	return b.String()
 }
 
 type tabLayout struct {
@@ -269,64 +332,57 @@ func (l tabLayout) isGroupFocused(it item) bool {
 	return l.items[l.focus].groupKey == it.groupKey
 }
 
-func (m *mixer) renderItem(it item, focused bool, layout tabLayout) []string {
-	w := m.width
-	if w < contentX+2 {
-		return nil
+// drawLine draws line l of item it on row y.
+func (m *mixer) drawLine(g *tui.Grid, y int, it item, l itemLine, focused bool, layout tabLayout) {
+	if l.kind == lineBlank {
+		return
 	}
-	inner := m.innerWidth()
-	gutter := " " + typeStrip(it)
-	line := func(s string) string { return gutter + " " + fit(s, inner) + "  " }
-	cLine := func(s string) string {
-		if m.barWidth() > 0 {
-			return gutter + " " + s + "  "
+	p := g.Pen(0, y, m.width)
+	p.Text(" ", plain)
+	p.Text(typeStripBar, typeStripStyle(it))
+	p.Text(" ", plain)
+	c := p.Sub(m.innerWidth())
+	switch l.kind {
+	case lineTitle:
+		m.drawTitle(&c, it, focused || layout.isGroupFocused(it), layout)
+	case lineChannel:
+		m.drawChannel(&c, y, it, l.channel, focused)
+	case lineNoVolume:
+		if it.node.JACK {
+			c.Repeat(" ", barX-contentX, plain)
+			c.Repeat(faderEmpty, m.barWidth(), dimStyle)
+			break
 		}
-		return line(s)
-	}
-	var lines []string
-	for _, l := range m.itemLines(it) {
-		switch l.kind {
-		case lineBlank:
-			lines = append(lines, "")
-		case lineTitle:
-			groupFocused := focused || layout.isGroupFocused(it)
-			lines = append(lines, line(m.titleLine(it, groupFocused, inner, layout)))
-		case lineChannel:
-			lines = append(lines, cLine(m.channelLine(it, l.channel, focused)))
-		case lineNoVolume:
-			if it.node.JACK {
-				lines = append(lines, cLine(fixedBar(m.barWidth())))
-				break
-			}
-			lines = append(lines, line(dimStyle.Render("volume not known yet")))
-		case lineProfile:
-			desc := "off"
-			if it.card.Profile >= 0 {
-				desc = it.card.Profiles[it.card.Profile].Description
-			}
-			lines = append(lines, line(dimStyle.Render("Profile: ")+desc))
+		c.Text("volume not known yet", dimStyle)
+	case lineProfile:
+		desc := "off"
+		if it.card.Profile >= 0 {
+			desc = it.card.Profiles[it.card.Profile].Description
 		}
+		c.Text("Profile: ", dimStyle)
+		c.Text(desc, plain)
 	}
-	return lines
+	c.Pad(plain)
+	p.Join(c)
 }
 
 const typeStripBar = "█"
 
 var (
-	cardStripStyle   = lipgloss.NewStyle().Foreground(lipgloss.White)
-	classStripStyles = [...]lipgloss.Style{
-		pw.Playback:  lipgloss.NewStyle().Foreground(lipgloss.Green),
-		pw.Recording: lipgloss.NewStyle().Foreground(lipgloss.Red),
-		pw.Sink:      lipgloss.NewStyle().Foreground(lipgloss.Yellow),
-		pw.Source:    lipgloss.NewStyle().Foreground(lipgloss.Magenta),
+	cardStripStyle   = tui.Style{Fg: tui.White}
+	classStripStyles = [...]tui.Style{
+		pw.Playback:  {Fg: tui.Green},
+		pw.Recording: {Fg: tui.Red},
+		pw.Sink:      {Fg: tui.Yellow},
+		pw.Source:    {Fg: tui.Magenta},
 	}
 )
 
-func typeStrip(it item) string {
+func typeStripStyle(it item) tui.Style {
 	if it.node == nil {
-		return cardStripStyle.Render(typeStripBar)
+		return cardStripStyle
 	}
-	return classStripStyles[it.node.Class].Render(typeStripBar)
+	return classStripStyles[it.node.Class]
 }
 
 const (
@@ -387,70 +443,63 @@ func portText(it item) string {
 	return port
 }
 
-func tagsText(it item) string {
-	if it.node.Default {
-		return defaultTagStyle.Render(defaultTag)
-	}
-	return strings.Repeat(" ", ansi.StringWidth(defaultTag))
-}
-
 const toolbarWidth = barX - contentX
 
-func (m *mixer) toolbar(it item, focused bool, layout tabLayout) string {
-	if it.node == nil {
-		return ""
-	}
-	var b strings.Builder
+func (m *mixer) drawToolbar(p *tui.Pen, it item, focused bool, layout tabLayout) {
+	c := p.Sub(toolbarWidth)
 	muted := it.node.Mute
 	if it.groupCount > 1 {
 		muted = layout.isGroupMuted(it)
 	}
-	b.WriteString(muteSymbol(muted, it.node.JACK, focused))
-	if btn := playButton(it, focused); btn != "" {
-		b.WriteByte(' ')
-		b.WriteString(btn)
+	c.Text(muteSymbol(muted, it.node.JACK, focused))
+	if btn, st := playButton(it, focused); btn != "" {
+		c.Text(" ", plain)
+		c.Text(btn, st)
 	}
-	w := ansi.StringWidth(b.String())
-	if w < toolbarWidth {
-		b.WriteString(strings.Repeat(" ", toolbarWidth-w))
-	}
-	return b.String()
+	c.Pad(plain)
+	p.Join(c)
 }
 
-func (m *mixer) titleLine(it item, focused bool, width int, layout tabLayout) string {
+// drawTitle draws the title line of it into p, which spans the inner width.
+func (m *mixer) drawTitle(p *tui.Pen, it item, focused bool, layout tabLayout) {
 	title := it.title()
 	if it.groupCount > 1 && it.groupTitle != "" {
 		title = it.groupTitle
 	}
+	titleStyle := plain
 	if focused {
-		title = focusTitleStyle.Render(title)
-	}
-	tb := m.toolbar(it, focused, layout)
-	avail := width
-	if it.node != nil {
-		avail = max(0, width-toolbarWidth)
+		titleStyle = focusTitleStyle
 	}
 	if it.node == nil {
-		return tb + title
+		p.Text(title, titleStyle)
+		return
 	}
+	m.drawToolbar(p, it, focused, layout)
+	avail := max(0, m.innerWidth()-toolbarWidth)
 	tw := 0
 	titleW := avail
-	finalPortW := 0
+	portW := 0
 	if it.node.Class == pw.Sink || it.node.Class == pw.Source {
 		tw = m.tagsWidth()
 		if avail < tw+2 {
-			return tb + title
+			p.Text(title, titleStyle)
+			return
 		}
-		titleW, finalPortW = m.titleColumns(avail, layout.portWidth)
+		titleW, portW = m.titleColumns(avail, layout.portWidth)
 	}
-	line := tb + fit(title, titleW)
-	if finalPortW > 0 {
-		line += " " + dimStyle.Render(fit(portText(it), finalPortW))
+	p.Fit(title, titleW, titleStyle, plain)
+	if portW > 0 {
+		p.Text(" ", plain)
+		p.Fit(portText(it), portW, dimStyle, dimStyle)
 	}
 	if tw > 0 {
-		line += " " + tagsText(it)
+		p.Text(" ", plain)
+		if it.node.Default {
+			p.Text(defaultTag, defaultTagStyle)
+		} else {
+			p.Repeat(" ", tw, plain)
+		}
 	}
-	return line
 }
 
 // portSpan returns the screen columns [start, end) of a device's port on
@@ -481,37 +530,33 @@ const (
 	playWidth  = 1
 )
 
-var mutedButtonStyle = lipgloss.NewStyle().Foreground(lipgloss.Yellow)
+var mutedButtonStyle = tui.Style{Fg: tui.Yellow}
 
-func muteSymbol(muted, jack, focused bool) string {
+func muteSymbol(muted, jack, focused bool) (string, tui.Style) {
 	if muted && !jack {
 		if focused {
-			return mutedButtonStyle.Bold(true).Render(symMuted)
+			return symMuted, tui.Style{Fg: mutedButtonStyle.Fg, Attrs: tui.Bold}
 		}
-		return mutedButtonStyle.Render(symMuted)
+		return symMuted, mutedButtonStyle
 	}
 	if focused {
-		return focusStyle.Bold(true).Render(symSpeaker)
+		return symSpeaker, tui.Style{Fg: focusStyle.Fg, Attrs: tui.Bold}
 	}
-	return symSpeaker
+	return symSpeaker, plain
 }
 
-func muteButton(n *pw.Node, focused bool) string {
-	return muteSymbol(n.Mute, n.JACK, focused)
-}
-
-func playButton(it item, focused bool) string {
+func playButton(it item, focused bool) (string, tui.Style) {
 	if it.player == nil {
-		return ""
+		return "", plain
 	}
 	sym := symPlay
 	if it.player.Playing {
 		sym = symPause
 	}
 	if focused {
-		return focusStyle.Bold(true).Render(sym)
+		return sym, tui.Style{Fg: focusStyle.Fg, Attrs: tui.Bold}
 	}
-	return sym
+	return sym, plain
 }
 
 func onMuteButton(it item, line itemLine, x int) bool {
@@ -533,32 +578,28 @@ func onStreamMuteButton(it item, line itemLine, x int) bool {
 		x >= streamMuteX && x < streamMuteX+streamMuteWidth
 }
 
-// channelLine renders a channel row (or folded row when i is -1).
-func (m *mixer) channelLine(it item, i int, focused bool) string {
+// drawChannel draws channel i of it (or its folded channels when i is -1)
+// into p, which spans the inner width of row y.
+func (m *mixer) drawChannel(p *tui.Pen, y int, it item, i int, focused bool) {
 	n := it.node
 	unlocked := m.isUnlocked(it)
 	chanFocused := focused && (!unlocked || m.focus[m.tab].channel == i)
 
 	var c pw.Channel
-	var nameStr string
+	var name string
 	if i < 0 && len(n.Channels) > 1 {
 		c = n.Channels[0]
-		nameStr = foldedName(n.Channels)
+		name = foldedName(n.Channels)
 	} else {
 		c = n.Channels[max(i, 0)]
-		nameStr = ansi.Truncate(c.Name, labelWidth, "…")
+		name = ansi.Truncate(c.Name, labelWidth, "…")
 	}
-	name := strings.Repeat(" ", max(0, labelWidth-ansi.StringWidth(nameStr))) + nameStr
-	vol := "   "
-	if !n.JACK {
-		vol = fmt.Sprintf("%3d", percent(c.Volume))
-	}
+	labelStyle := plain
 	if chanFocused {
-		name = boldStyle.Render(name)
-		vol = boldStyle.Render(vol)
+		labelStyle = boldStyle
 	}
 
-	var prefix string
+	l := p.Sub(barX - contentX)
 	if it.groupCount > 1 {
 		if i < 0 || i == 0 {
 			branch := "├"
@@ -567,28 +608,34 @@ func (m *mixer) channelLine(it item, i int, focused bool) string {
 			} else if it.groupLast {
 				branch = "└"
 			}
-			branchStr := dimStyle.Render(branch) + " "
-			spkStr := muteButton(n, focused) + " "
-			innerBracket := "  "
+			l.Text(branch, dimStyle)
+			l.Text(" ", plain)
+			l.Text(muteSymbol(n.Mute, n.JACK, focused))
+			l.Text(" ", plain)
 			if len(n.Channels) > 1 && i >= 0 {
-				innerBracket = dimStyle.Render("┌") + " "
+				l.Text("┌", dimStyle)
+				l.Text(" ", plain)
+			} else {
+				l.Text("  ", plain)
 			}
-			prefix = branchStr + spkStr + innerBracket
 		} else {
-			stem := "  "
 			if !it.groupLast {
-				stem = dimStyle.Render("│") + " "
+				l.Text("│", dimStyle)
+				l.Text(" ", plain)
+			} else {
+				l.Text("  ", plain)
 			}
-			spkSpace := "   "
-			innerBracket := dimStyle.Render("├") + " "
+			l.Text("   ", plain)
+			bracket := "├"
 			if i == len(n.Channels)-1 {
-				innerBracket = dimStyle.Render("└") + " "
+				bracket = "└"
 			}
-			prefix = stem + spkSpace + innerBracket
+			l.Text(bracket, dimStyle)
+			l.Text(" ", plain)
 		}
 	} else {
 		if i < 0 || len(n.Channels) <= 1 {
-			prefix = "       "
+			l.Text("       ", plain)
 		} else {
 			bracket := "├"
 			if i == 0 {
@@ -596,15 +643,38 @@ func (m *mixer) channelLine(it item, i int, focused bool) string {
 			} else if i == len(n.Channels)-1 {
 				bracket = "└"
 			}
-			prefix = "     " + dimStyle.Render(bracket) + " "
+			l.Text("     ", plain)
+			l.Text(bracket, dimStyle)
+			l.Text(" ", plain)
 		}
 	}
-
-	label := prefix + name + " " + vol + " "
+	l.Repeat(" ", labelWidth-ansi.StringWidth(name), labelStyle)
+	l.Text(name, labelStyle)
+	l.Text(" ", plain)
 	if n.JACK {
-		return label + meterBar(m.level(it, i), m.peak(it, i), m.barWidth(), m.opts.limit, m.look())
+		l.Text("   ", labelStyle)
+	} else {
+		l.Text(fmt.Sprintf("%3d", percent(c.Volume)), labelStyle)
 	}
-	return label + bar(c.Volume, m.level(it, i), m.peak(it, i), m.barWidth(), m.opts.limit, n.Mute, m.look())
+	l.Pad(plain)
+	p.Join(l)
+
+	if m.barWidth() > 0 {
+		m.meterRows = append(m.meterRows, meterRow{y: y, it: it, channel: i})
+		m.drawChannelBar(p, it, i)
+	}
+}
+
+// drawChannelBar draws the fader or meter of channel i of it (or its folded
+// channels when i is -1) into p, which spans the bar.
+func (m *mixer) drawChannelBar(p *tui.Pen, it item, i int) {
+	n := it.node
+	if n.JACK {
+		drawMeterBar(p, m.level(it, i), m.peak(it, i), m.barWidth(), m.opts.limit, m.look())
+		return
+	}
+	c := n.Channels[max(i, 0)]
+	drawBar(p, c.Volume, m.level(it, i), m.peak(it, i), m.barWidth(), m.opts.limit, n.Mute, m.look())
 }
 
 const (
@@ -613,14 +683,29 @@ const (
 	faderEmpty = "░"
 )
 
-func fixedBar(width int) string {
-	return strings.Repeat(" ", barX-contentX) + dimStyle.Render(strings.Repeat(faderEmpty, max(width, 0)))
+type barCell struct {
+	glyph string
+	style uint8
 }
 
-// meterBar renders a level meter of width cells without a volume fader.
-func meterBar(level, peak float64, width int, limit float64, look meterLook) string {
+// drawCells draws cells into p, as runs of a glyph in one style.
+func drawCells(p *tui.Pen, cells []barCell, styles []tui.Style) {
+	for i := 0; i < len(cells); {
+		j := i + 1
+		for j < len(cells) && cells[j] == cells[i] {
+			j++
+		}
+		p.Repeat(cells[i].glyph, j-i, styles[cells[i].style])
+		i = j
+	}
+}
+
+var meterBarStyles = []tui.Style{barFullStyle, barOverStyle, brightFull, brightOver, dimStyle}
+
+// drawMeterBar draws a level meter of width cells without a volume fader.
+func drawMeterBar(p *tui.Pen, level, peak float64, width int, limit float64, look meterLook) {
 	if width <= 0 {
-		return ""
+		return
 	}
 	lit, pk := 0, 0
 	if look != meterOff {
@@ -632,10 +717,10 @@ func meterBar(level, peak float64, width int, limit float64, look meterLook) str
 		}
 	}
 	if lit == 0 && pk == 0 {
-		return dimStyle.Render(strings.Repeat(faderEmpty, width))
+		p.Repeat(faderEmpty, width, dimStyle)
+		return
 	}
 	hundred := knobCell(1, limit, width)
-	styles := [...]lipgloss.Style{barFullStyle, barOverStyle, brightFull, brightOver, dimStyle}
 	var cellBuf [256]barCell
 	var cells []barCell
 	if width <= len(cellBuf) {
@@ -644,7 +729,7 @@ func meterBar(level, peak float64, width int, limit float64, look meterLook) str
 		cells = make([]barCell, width)
 	}
 	for i := range cells {
-		over := 0
+		var over uint8
 		if i > hundred {
 			over = 1
 		}
@@ -660,55 +745,34 @@ func meterBar(level, peak float64, width int, limit float64, look meterLook) str
 		}
 		cells[i] = c
 	}
-	var b strings.Builder
-	b.Grow(width * 6)
-	for i := 0; i < len(cells); {
-		j := i + 1
-		for j < len(cells) && cells[j] == cells[i] {
-			j++
-		}
-		b.WriteString(styles[cells[i].style].Render(strings.Repeat(cells[i].glyph, j-i)))
-		i = j
-	}
-	return b.String()
-}
-
-type barCell struct {
-	glyph string
-	style int
+	drawCells(p, cells, meterBarStyles)
 }
 
 var (
-	emptyOverStyle = lipgloss.NewStyle().Foreground(lipgloss.Red).Faint(true)
-	brightFull     = lipgloss.NewStyle().Foreground(lipgloss.BrightGreen)
-	brightOver     = lipgloss.NewStyle().Foreground(lipgloss.BrightRed)
+	emptyOverStyle = tui.Style{Fg: tui.Red, Attrs: tui.Faint}
+	brightFull     = tui.Style{Fg: tui.BrightGreen}
+	brightOver     = tui.Style{Fg: tui.BrightRed}
+	barStyles      = []tui.Style{barFullStyle, barOverStyle, brightFull, brightOver}
 )
 
-// bar renders a fader of width cells for volume v, level, and peak on [0, limit].
-func bar(v, level, peak float64, width int, limit float64, muted bool, look meterLook) string {
+// drawBar draws a fader of width cells for volume v, level, and peak on
+// [0, limit].
+func drawBar(p *tui.Pen, v, level, peak float64, width int, limit float64, muted bool, look meterLook) {
 	if width <= 0 {
-		return ""
+		return
 	}
 	knob := knobCell(v, limit, width)
 	hundred := knobCell(1, limit, width)
-	var b strings.Builder
-	b.Grow(width * 6)
-	run := func(s string, from, to int, style lipgloss.Style) {
-		if to > from {
-			b.WriteString(style.Render(strings.Repeat(s, to-from)))
-		}
-	}
 	if muted {
-		run(faderFull, 0, knob, dimStyle)
-		run(faderKnob, knob, knob+1, dimStyle)
-		run(faderEmpty, knob+1, width, dimStyle)
-		return b.String()
+		p.Repeat(faderFull, knob, dimStyle)
+		p.Repeat(faderKnob, 1, dimStyle)
+		p.Repeat(faderEmpty, width-knob-1, dimStyle)
+		return
 	}
 	knobStyle := barFullStyle
 	if knob > hundred {
 		knobStyle = barOverStyle
 	}
-	styles := [...]lipgloss.Style{barFullStyle, barOverStyle, brightFull, brightOver}
 	lit, pk := 0, 0
 	if look != meterOff {
 		if level > 0 {
@@ -726,7 +790,7 @@ func bar(v, level, peak float64, width int, limit float64, muted bool, look mete
 		cells = make([]barCell, knob)
 	}
 	for i := range cells {
-		over := 0
+		var over uint8
 		if i > hundred {
 			over = 1
 		}
@@ -744,18 +808,10 @@ func bar(v, level, peak float64, width int, limit float64, muted bool, look mete
 		}
 		cells[i] = c
 	}
-	for i := 0; i < len(cells); {
-		j := i + 1
-		for j < len(cells) && cells[j] == cells[i] {
-			j++
-		}
-		run(cells[i].glyph, i, j, styles[cells[i].style])
-		i = j
-	}
-	run(faderKnob, knob, knob+1, knobStyle)
-	run(faderEmpty, knob+1, max(knob+1, hundred+1), dimStyle)
-	run(faderEmpty, max(knob+1, hundred+1), width, emptyOverStyle)
-	return b.String()
+	drawCells(p, cells, barStyles)
+	p.Repeat(faderKnob, 1, knobStyle)
+	p.Repeat(faderEmpty, max(knob+1, hundred+1)-(knob+1), dimStyle)
+	p.Repeat(faderEmpty, width-max(knob+1, hundred+1), emptyOverStyle)
 }
 
 func knobCell(v, limit float64, width int) int {
@@ -770,49 +826,54 @@ func (m *mixer) menuRows() (first, n int) {
 	return first, n
 }
 
-func (m *mixer) menuBox() (box string, x, y int) {
+// menuBox returns the width inside the menu's box and the box's position
+// and size.
+func (m *mixer) menuBox() (inner, x, y, w, h int) {
 	mn := m.menu
-	width := ansi.StringWidth(mn.title)
+	inner = ansi.StringWidth(mn.title)
 	for _, it := range mn.items {
-		width = max(width, ansi.StringWidth(it.label)+2)
+		inner = max(inner, ansi.StringWidth(it.label)+2)
 	}
-	width = max(min(width, m.width-4), 1)
+	inner = max(min(inner, m.width-4), 1)
 	first, n := m.menuRows()
-	lines := []string{boldStyle.Render(ansi.Truncate(mn.title, width, "…"))}
-	for i := first; i < min(first+n, len(mn.items)); i++ {
+	w, h = inner+4, min(first+n, len(mn.items))-first+3
+	return inner, max((m.width-w)/2, 0), listTop + max(m.listHeight()-h, 0)/2, w, h
+}
+
+// drawMenu draws the menu over the screen.
+func (m *mixer) drawMenu(g *tui.Grid) {
+	mn := m.menu
+	inner, x, y, w, h := m.menuBox()
+	edge := func(row int, left, right string) {
+		p := g.Pen(x, y+row, x+w)
+		p.Text(left, plain)
+		p.Repeat("─", w-2, plain)
+		p.Text(right, plain)
+	}
+	row := func(row int, text string, st, pad tui.Style) {
+		p := g.Pen(x, y+row, x+w)
+		p.Text("│ ", plain)
+		p.Fit(text, inner, st, pad)
+		p.Text(" │", plain)
+	}
+	edge(0, "╭", "╮")
+	row(1, mn.title, boldStyle, plain)
+	first, _ := m.menuRows()
+	for r := 2; r < h-1; r++ {
+		i := first + r - 2
 		it := mn.items[i]
 		mark := "  "
 		if it.active {
 			mark = "● "
 		}
-		label := fit(mark+it.label, width)
+		st := plain
 		switch {
 		case i == mn.cursor:
-			label = menuCursorStyle.Render(label)
+			st = menuCursorStyle
 		case it.dim:
-			label = dimStyle.Render(label)
+			st = dimStyle
 		}
-		lines = append(lines, label)
+		row(r, mark+it.label, st, st)
 	}
-	box = menuBoxStyle.Render(strings.Join(lines, "\n"))
-	bw := ansi.StringWidth(strings.SplitN(box, "\n", 2)[0])
-	bh := strings.Count(box, "\n") + 1
-	return box, max((m.width-bw)/2, 0), listTop + max(m.listHeight()-bh, 0)/2
-}
-
-// overlay draws box over content with its top left corner at cell x, y.
-func overlay(content, box string, x, y int) string {
-	lines := strings.Split(content, "\n")
-	x = max(0, x)
-	for i, b := range strings.Split(box, "\n") {
-		if y+i >= len(lines) {
-			break
-		}
-		line := lines[y+i]
-		left := ansi.Truncate(line, x, "")
-		left += strings.Repeat(" ", max(0, x-ansi.StringWidth(left)))
-		right := ansi.Cut(line, x+ansi.StringWidth(b), ansi.StringWidth(line))
-		lines[y+i] = left + ansi.ResetStyle + b + ansi.ResetStyle + right
-	}
-	return strings.Join(lines, "\n")
+	edge(h-1, "╰", "╯")
 }

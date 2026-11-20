@@ -13,8 +13,6 @@ import (
 	"path/filepath"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
-
 	"github.com/some-programs/pipmix/internal/mpris"
 	"github.com/some-programs/pipmix/internal/pulse"
 	"github.com/some-programs/pipmix/internal/pw"
@@ -77,8 +75,8 @@ func Run(args []string) error {
 	if debug.dump {
 		return dump(ctx, os.Stdout, &dumpLog, fs, opts, client, media, meter)
 	}
-	_, err = tea.NewProgram(app{mixer: newMixer(client, media, meter, quitKeys(), opts)}, tea.WithFPS(opts.fps)).Run()
-	return err
+	m := newMixer(client, media, meter, quitKeys(), opts)
+	return run(ctx, &m)
 }
 
 type debugFlags struct {
@@ -126,43 +124,8 @@ func stateDir() (string, error) {
 	return filepath.Join(home, ".local", "state"), nil
 }
 
-type app struct {
-	mixer mixer
-}
-
 func quitKeys() section {
 	return section{"Quit", []binding{
-		{[]string{"q", "ctrl+c"}, "Quit", "", func(*mixer) tea.Cmd { return tea.Quit }},
+		{[]string{"q", "ctrl+c"}, "Quit", "", func(*mixer) command { return quit }},
 	}}
-}
-
-func (a app) Init() tea.Cmd { return a.mixer.init() }
-
-func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		a.mixer.setSize(msg.Width, msg.Height)
-		a.mixer.watchMeters()
-	case tea.KeyPressMsg:
-		cmd = a.mixer.handleKey(msg.String())
-		a.mixer.watchMeters()
-	case tea.MouseMsg:
-		cmd = a.mixer.handleMouse(msg)
-		a.mixer.watchMeters()
-	default:
-		cmd = a.mixer.update(msg)
-	}
-	return a, cmd
-}
-
-func (a app) View() tea.View {
-	var v tea.View
-	v.AltScreen = true
-	if a.mixer.opts.mouse {
-		v.MouseMode = tea.MouseModeCellMotion
-	}
-	v.ReportFocus = true
-	v.SetContent(a.mixer.view())
-	return v
 }

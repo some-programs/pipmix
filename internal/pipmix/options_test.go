@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/some-programs/pipmix/internal/pulse"
 	"github.com/some-programs/pipmix/internal/pw"
+	"github.com/some-programs/pipmix/internal/tui"
 )
 
 func parseOptions(args ...string) (options, error) {
@@ -67,7 +67,7 @@ func TestMetersAlways(t *testing.T) {
 	m := newMixer(pw.NewClient(nil), nil, pulse.NewMeter(nil, 0), quitKeys(), o)
 	m.snap = meterSnapshot()
 	m.setSize(60, 20)
-	m.update(tea.BlurMsg{})
+	m.update(tui.BlurEvent{})
 	if got := m.meterTargets(); len(got) == 0 {
 		t.Error("-meter.always: no targets while not focused")
 	}
@@ -114,8 +114,8 @@ func TestOptionsInUI(t *testing.T) {
 	if strings.Contains(view, "click") {
 		t.Errorf("help without the mouse has mouse actions:\n%s", view)
 	}
-	if got := (app{mixer: m}).View().MouseMode; got != tea.MouseModeNone {
-		t.Errorf("-mouse.disable: mouse mode %v", got)
+	if got := terminalOptions(m.opts).Mouse; got {
+		t.Error("-mouse.disable: the terminal reports the mouse")
 	}
 	// A full fader is the limit.
 	if k := knobCell(1, o.limit, 16); k != 15 {

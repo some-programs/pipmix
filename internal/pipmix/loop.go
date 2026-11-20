@@ -1,0 +1,142 @@
+package pipmix
+
+import (
+	"context"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/some-programs/pipmix/internal/tui"
+)
+
+// A message tells the mixer that something happened, such as a new
+// PipeWire snapshot or an expired notice.
+type message any
+
+// A command does work, such as waiting for an update, away from the event
+// loop, and returns the message to hand the mixer when done, or nil.
+type command func() message
+
+type quitMsg struct{}
+
+// quit is the command that ends the event loop.
+func quit() message { return quitMsg{} }
+
+// after returns a command that returns msg after d.
+func after(d time.Duration, msg message) command {
+	return func() message {
+		time.Sleep(d)
+		return msg
+	}
+}
+
+// terminalOptions returns the terminal modes the mixer needs.
+func terminalOptions(o options) tui.Options {
+	return tui.Options{Mouse: o.mouse, Focus: true}
+}
+
+// run shows m on the terminal until a quit key or a signal to stop.
+func run(ctx context.Context, m *mixer) error {
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+	t, err := tui.Open(terminalOptions(m.opts))
+	if err != nil {
+		return err
+	}
+	defer t.Close()
+
+	msgs := make(chan message, 16)
+	exec := func(c command) {
+		if c == nil {
+			return
+		}
+		go func() {
+			if msg := c(); msg != nil {
+				select {
+				case msgs <- msg:
+				case <-ctx.Done():
+				}
+			}
+		}()
+	}
+	for _, c := range m.init() {
+		exec(c)
+	}
+
+	var (
+		grid   = tui.NewGrid(0, 0)
+		screen = tui.NewScreen(t)
+		frame  = time.Second / time.Duration(m.opts.fps)
+		ticker = time.NewTicker(frame)
+		timer  = time.NewTimer(frame)
+		tickC  <-chan time.Time // the ticker's channel while the meters move
+		frameC <-chan time.Time // the timer's channel while a frame waits
+		sized  bool             // the size of the terminal is known
+		full   bool             // the screen needs drawing
+		meters bool             // the meters need drawing
+		drawn  time.Time        // when the last frame was drawn
+	)
+	ticker.Stop()
+	timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case ev := <-t.Events():
+			switch ev := ev.(type) {
+			case tui.ResizeEvent:
+				m.setSize(ev.Width, ev.Height)
+				m.watchMeters()
+				sized = true
+			case tui.KeyEvent:
+				exec(m.handleKey(string(ev)))
+				m.watchMeters()
+			case tui.MouseEvent:
+				exec(m.handleMouse(ev))
+				m.watchMeters()
+			default:
+				exec(m.update(ev))
+			}
+			full = true
+		case msg := <-msgs:
+			if _, ok := msg.(quitMsg); ok {
+				return nil
+			}
+			exec(m.update(msg))
+			full = true
+		case <-tickC:
+			exec(m.tickMetering())
+			meters = true
+		case <-frameC:
+			frameC = nil
+		}
+
+		if m.ticking != (tickC != nil) {
+			if m.ticking {
+				ticker.Reset(frame)
+				tickC = ticker.C
+			} else {
+				ticker.Stop()
+				tickC = nil
+			}
+		}
+		if !sized || !full && !meters || frameC != nil {
+			continue
+		}
+		if wait := frame - time.Since(drawn); wait > 0 {
+			timer.Reset(wait)
+			frameC = timer.C
+			continue
+		}
+		if full {
+			m.draw(grid)
+		} else {
+			m.drawMeters(grid)
+		}
+		full, meters = false, false
+		drawn = time.Now()
+		if err := screen.Flush(grid); err != nil {
+			return err
+		}
+	}
+}
