@@ -5,11 +5,10 @@ import (
 	"strconv"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
-
 	"github.com/some-programs/pipmix/internal/mpris"
 	"github.com/some-programs/pipmix/internal/pulse"
 	"github.com/some-programs/pipmix/internal/pw"
+	"github.com/some-programs/pipmix/internal/tui"
 )
 
 const noticeTime = 5 * time.Second
@@ -112,6 +111,7 @@ type mixer struct {
 	dot          map[uint32][]float64
 	dotHold      map[uint32][]time.Time
 	levelsAt     time.Time
+	meterRows    []meterRow // where the last draw put meters
 	ticking      bool
 	meterWaiting bool // a waitMeter command is pending
 	blurred      bool
@@ -166,30 +166,30 @@ type noticeMsg struct {
 
 type noticeExpiredMsg int
 
-func notify(text string) tea.Cmd {
-	return func() tea.Msg { return noticeMsg{text: text} }
+func notify(text string) command {
+	return func() message { return noticeMsg{text: text} }
 }
 
-func (m *mixer) waitSnapshot() tea.Cmd {
+func (m *mixer) waitSnapshot() command {
 	updated := m.client.Updated()
-	return func() tea.Msg {
+	return func() message {
 		<-updated
 		return snapshotMsg{}
 	}
 }
 
-func (m *mixer) waitMedia() tea.Cmd {
+func (m *mixer) waitMedia() command {
 	if m.media == nil {
 		return nil
 	}
 	updated := m.media.Updated()
-	return func() tea.Msg {
+	return func() message {
 		<-updated
 		return mediaMsg{}
 	}
 }
 
-func (m *mixer) init() tea.Cmd { return tea.Batch(m.waitSnapshot(), m.waitMedia(), m.nextMeter()) }
+func (m *mixer) init() []command { return []command{m.waitSnapshot(), m.waitMedia(), m.nextMeter()} }
 
 // findMedia matches playback streams to MPRIS players by process ID.
 func (m *mixer) findMedia() {
@@ -233,7 +233,7 @@ func (m *mixer) setSize(width, height int) {
 	m.scrollHelp(0)
 }
 
-func (m *mixer) update(msg tea.Msg) tea.Cmd {
+func (m *mixer) update(msg message) command {
 	switch msg := msg.(type) {
 	case snapshotMsg:
 		m.snap = m.client.Snapshot()
@@ -248,13 +248,11 @@ func (m *mixer) update(msg tea.Msg) tea.Cmd {
 	case meterMsg:
 		m.meterWaiting = false
 		return m.startMetering()
-	case meterTickMsg:
-		return m.tickMetering()
-	case tea.FocusMsg:
+	case tui.FocusEvent:
 		m.blurred = false
 		m.watchMeters()
 		return m.startMetering()
-	case tea.BlurMsg:
+	case tui.BlurEvent:
 		m.blurred = true
 		m.watchMeters()
 		return m.startMetering()
@@ -264,7 +262,7 @@ func (m *mixer) update(msg tea.Msg) tea.Cmd {
 		seq := m.noticeSeq
 		m.scroll()
 		m.scrollHelp(0)
-		return tea.Tick(noticeTime, func(time.Time) tea.Msg { return noticeExpiredMsg(seq) })
+		return after(noticeTime, noticeExpiredMsg(seq))
 	case noticeExpiredMsg:
 		if int(msg) == m.noticeSeq {
 			m.notice = ""
@@ -656,7 +654,7 @@ func (m *mixer) pageItems() int {
 	return max(1, m.listHeight()/m.itemHeight(it))
 }
 
-func (m *mixer) volumeTarget() (it item, channel int, cmd tea.Cmd) {
+func (m *mixer) volumeTarget() (it item, channel int, cmd command) {
 	it, i := m.focused()
 	switch {
 	case i < 0:
@@ -675,7 +673,7 @@ func (m *mixer) volumeTarget() (it item, channel int, cmd tea.Cmd) {
 	return it, channel, nil
 }
 
-func (m *mixer) changeVolume(delta float64) tea.Cmd {
+func (m *mixer) changeVolume(delta float64) command {
 	it, channel, cmd := m.volumeTarget()
 	if cmd != nil {
 		return cmd
@@ -684,7 +682,7 @@ func (m *mixer) changeVolume(delta float64) tea.Cmd {
 	return nil
 }
 
-func (m *mixer) setVolume100() tea.Cmd {
+func (m *mixer) setVolume100() command {
 	it, channel, cmd := m.volumeTarget()
 	if cmd != nil {
 		return cmd
@@ -693,7 +691,7 @@ func (m *mixer) setVolume100() tea.Cmd {
 	return nil
 }
 
-func (m *mixer) toggleMute() tea.Cmd {
+func (m *mixer) toggleMute() command {
 	it, _, cmd := m.volumeTarget()
 	if cmd != nil {
 		return cmd
@@ -702,7 +700,7 @@ func (m *mixer) toggleMute() tea.Cmd {
 	return nil
 }
 
-func (m *mixer) toggleLock() tea.Cmd {
+func (m *mixer) toggleLock() command {
 	it, i := m.focused()
 	if i < 0 || it.channels() < 2 {
 		return notify("Only items with more than one channel have a lock")
@@ -713,7 +711,7 @@ func (m *mixer) toggleLock() tea.Cmd {
 	return nil
 }
 
-func (m *mixer) setDefault() tea.Cmd {
+func (m *mixer) setDefault() command {
 	it, i := m.focused()
 	if i < 0 || it.node == nil || (it.node.Class != pw.Sink && it.node.Class != pw.Source) {
 		return notify("Only output and input devices can be the default")
@@ -722,7 +720,7 @@ func (m *mixer) setDefault() tea.Cmd {
 	return nil
 }
 
-func (m *mixer) openRouteMenu() tea.Cmd {
+func (m *mixer) openRouteMenu() command {
 	it, i := m.focused()
 	if i < 0 || it.node == nil || len(it.node.Routes) == 0 {
 		return notify("Only devices of sound cards have ports")
@@ -741,7 +739,7 @@ func (m *mixer) openRouteMenu() tea.Cmd {
 	return nil
 }
 
-func (m *mixer) openProfileMenu() tea.Cmd {
+func (m *mixer) openProfileMenu() command {
 	it, i := m.focused()
 	if i < 0 || it.card == nil {
 		return notify("Profiles are on the Cards tab")
@@ -777,7 +775,7 @@ func (m *mixer) setTab(t tab) {
 	m.scroll()
 }
 
-func (m *mixer) togglePlayPause() tea.Cmd {
+func (m *mixer) togglePlayPause() command {
 	it, i := m.focused()
 	if i < 0 || it.node == nil || it.node.Class != pw.Playback {
 		return notify("Only playback streams have media controls")
@@ -787,7 +785,7 @@ func (m *mixer) togglePlayPause() tea.Cmd {
 	}
 	name := it.player.Name
 	media := m.media
-	return func() tea.Msg {
+	return func() message {
 		if err := media.PlayPause(name); err != nil {
 			return noticeMsg{text: "Play/pause: " + err.Error(), err: true}
 		}
@@ -795,7 +793,7 @@ func (m *mixer) togglePlayPause() tea.Cmd {
 	}
 }
 
-func (m *mixer) portOrPlayPause() tea.Cmd {
+func (m *mixer) portOrPlayPause() command {
 	it, i := m.focused()
 	if i >= 0 && it.node != nil && it.node.Class == pw.Playback {
 		return m.togglePlayPause()
@@ -804,7 +802,7 @@ func (m *mixer) portOrPlayPause() tea.Cmd {
 }
 
 // toggleSolo solos or unsolos the focused playback stream.
-func (m *mixer) toggleSolo() tea.Cmd {
+func (m *mixer) toggleSolo() command {
 	it, i := m.focused()
 	if i < 0 || it.node == nil || it.node.Class != pw.Playback || it.node.JACK {
 		return notify("Only playback streams can be soloed")

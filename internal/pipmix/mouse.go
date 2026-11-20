@@ -2,28 +2,26 @@ package pipmix
 
 import (
 	"math"
-	"strings"
 
-	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/x/ansi"
+	"github.com/some-programs/pipmix/internal/tui"
 )
 
 const wheelRows = 3
 
-func (m *mixer) handleMouse(msg tea.MouseMsg) tea.Cmd {
+func (m *mixer) handleMouse(ev tui.MouseEvent) command {
 	if m.menu != nil {
-		return m.menuMouse(msg)
+		return m.menuMouse(ev)
 	}
-	switch msg := msg.(type) {
-	case tea.MouseClickMsg:
-		return m.click(msg.Mouse())
-	case tea.MouseMotionMsg:
-		m.dragTo(msg.Mouse())
-	case tea.MouseReleaseMsg:
+	switch ev.Kind {
+	case tui.MouseClick:
+		return m.click(ev)
+	case tui.MouseMotion:
+		m.dragTo(ev)
+	case tui.MouseRelease:
 		m.drag = nil
-	case tea.MouseWheelMsg:
+	case tui.MouseWheel:
 		delta := wheelRows
-		if msg.Button == tea.MouseWheelUp {
+		if ev.Button == tui.MouseWheelUp {
 			delta = -delta
 		}
 		if m.help {
@@ -35,8 +33,8 @@ func (m *mixer) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	return nil
 }
 
-func (m *mixer) click(mouse tea.Mouse) tea.Cmd {
-	if mouse.Y == 0 && mouse.Button == tea.MouseLeft {
+func (m *mixer) click(mouse tui.MouseEvent) command {
+	if mouse.Y == 0 && mouse.Button == tui.MouseLeft {
 		for _, s := range tabSpans() {
 			if mouse.X >= s.start && mouse.X < s.end {
 				m.setTab(s.tab)
@@ -54,7 +52,7 @@ func (m *mixer) click(mouse tea.Mouse) tea.Cmd {
 	m.setFocus(items, i, line.channel)
 	it := items[i]
 	switch mouse.Button {
-	case tea.MouseMiddle:
+	case tui.MouseMiddle:
 		switch line.kind {
 		case lineChannel:
 			if mouse.X < barX-2 || mouse.X >= barX+m.barWidth() {
@@ -69,9 +67,9 @@ func (m *mixer) click(mouse tea.Mouse) tea.Cmd {
 			}
 			m.client.SetVolume(it.id, channel, 1.0, m.opts.limit)
 		}
-	case tea.MouseRight:
+	case tui.MouseRight:
 		return m.toggleMute()
-	case tea.MouseLeft:
+	case tui.MouseLeft:
 		if onStreamMuteButton(it, line, mouse.X) {
 			m.client.ToggleMute(it.id)
 			return nil
@@ -111,9 +109,9 @@ func (m *mixer) click(mouse tea.Mouse) tea.Cmd {
 	return nil
 }
 
-func (m *mixer) dragTo(mouse tea.Mouse) {
+func (m *mixer) dragTo(mouse tui.MouseEvent) {
 	d := m.drag
-	if d == nil || mouse.Button != tea.MouseLeft {
+	if d == nil || mouse.Button != tui.MouseLeft {
 		return
 	}
 	if v := m.volumeAt(mouse.X); v != d.last {
@@ -196,25 +194,22 @@ func (m *mixer) scrollBy(delta int) {
 
 func abs(n int) int { return max(n, -n) }
 
-func (m *mixer) menuMouse(msg tea.MouseMsg) tea.Cmd {
-	switch msg := msg.(type) {
-	case tea.MouseClickMsg:
-		box, x, y := m.menuBox()
-		lines := strings.Split(box, "\n")
-		w := ansi.StringWidth(lines[0])
-		mouse := msg.Mouse()
-		if mouse.X < x || mouse.X >= x+w || mouse.Y < y || mouse.Y >= y+len(lines) {
+func (m *mixer) menuMouse(mouse tui.MouseEvent) command {
+	switch mouse.Kind {
+	case tui.MouseClick:
+		_, x, y, w, h := m.menuBox()
+		if mouse.X < x || mouse.X >= x+w || mouse.Y < y || mouse.Y >= y+h {
 			m.menu = nil
 			return nil
 		}
 		// Rows: the border, the title, then the items.
 		first, n := m.menuRows()
-		if k := mouse.Y - y - 2; mouse.Button == tea.MouseLeft && k >= 0 && k < n && first+k < len(m.menu.items) {
+		if k := mouse.Y - y - 2; mouse.Button == tui.MouseLeft && k >= 0 && k < n && first+k < len(m.menu.items) {
 			m.menu.cursor = first + k
 			m.choose()
 		}
-	case tea.MouseWheelMsg:
-		if msg.Button == tea.MouseWheelUp {
+	case tui.MouseWheel:
+		if mouse.Button == tui.MouseWheelUp {
 			m.moveMenu(-1)
 		} else {
 			m.moveMenu(1)

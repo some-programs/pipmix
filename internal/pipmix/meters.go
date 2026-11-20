@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
-
 	"github.com/some-programs/pipmix/internal/pulse"
 	"github.com/some-programs/pipmix/internal/pw"
 )
@@ -52,14 +50,11 @@ const (
 
 var meterLookFlags = []string{"solid", "shade", "dot"}
 
-type (
-	meterMsg     struct{}
-	meterTickMsg struct{}
-)
+type meterMsg struct{}
 
 // waitMeter waits for the next meter snapshot, unless a wait is already
 // pending.
-func (m *mixer) waitMeter() tea.Cmd {
+func (m *mixer) waitMeter() command {
 	if m.meter == nil || m.meterWaiting {
 		return nil
 	}
@@ -67,12 +62,12 @@ func (m *mixer) waitMeter() tea.Cmd {
 	return m.nextMeter()
 }
 
-func (m *mixer) nextMeter() tea.Cmd {
+func (m *mixer) nextMeter() command {
 	if m.meter == nil {
 		return nil
 	}
 	updated := m.meter.Updated()
-	return func() tea.Msg {
+	return func() message {
 		<-updated
 		return meterMsg{}
 	}
@@ -147,7 +142,7 @@ func (m *mixer) watchMeters() {
 	m.meter.Watch(targets)
 }
 
-func (m *mixer) startMetering() tea.Cmd {
+func (m *mixer) startMetering() command {
 	if m.ticking {
 		return nil
 	}
@@ -159,10 +154,12 @@ func (m *mixer) startMetering() tea.Cmd {
 		return m.waitMeter()
 	}
 	m.ticking = true
-	return tea.Tick(time.Second/time.Duration(m.opts.fps), func(time.Time) tea.Msg { return meterTickMsg{} })
+	return nil
 }
 
-func (m *mixer) tickMetering() tea.Cmd {
+// tickMetering moves the meters on. The event loop calls it every frame
+// while m.ticking is set.
+func (m *mixer) tickMetering() command {
 	snap := &pulse.Snapshot{}
 	if m.meter != nil {
 		snap = m.meter.Snapshot()
@@ -171,7 +168,7 @@ func (m *mixer) tickMetering() tea.Cmd {
 		m.ticking = false
 		return m.waitMeter()
 	}
-	return tea.Tick(time.Second/time.Duration(m.opts.fps), func(time.Time) tea.Msg { return meterTickMsg{} })
+	return nil
 }
 
 // setLevels updates the fill and peak positions at now and reports whether
@@ -326,7 +323,7 @@ func channelLevel(levels []float64, ch int) float64 {
 	return 0
 }
 
-func (m *mixer) toggleMeterAlways() tea.Cmd {
+func (m *mixer) toggleMeterAlways() command {
 	switch m.opts.meters {
 	case metersOff:
 		return notify("Meters are off (-meter.disable)")
@@ -338,7 +335,7 @@ func (m *mixer) toggleMeterAlways() tea.Cmd {
 	return notify("Meters always, focused or not")
 }
 
-func (m *mixer) toggleMeters() tea.Cmd {
+func (m *mixer) toggleMeters() command {
 	if m.meter == nil {
 		return notify("Meters are off (-meter.disable)")
 	}
