@@ -21,10 +21,14 @@ import (
 // Run parses flags and config from args and runs the mixer.
 func Run(args []string) error {
 	fs := flag.NewFlagSet("pipmix", flag.ExitOnError)
+	version := addVersionFlags(fs)
 	debug := addDebugFlags(fs)
 	values := addFlags(fs)
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if version.print(os.Stdout) {
+		return nil
 	}
 	opts, err := values.check()
 	if err != nil {
