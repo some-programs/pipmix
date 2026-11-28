@@ -70,5 +70,5 @@ enable = true     # list JACK clients
 ## Technical Details
 
 - **Pure Go PipeWire protocol implementation**: Speaks PipeWire's native SPA POD protocol directly over the PipeWire Unix socket to track graph state and control volumes, mutes, routes, card profiles, and default devices, reconnecting automatically if PipeWire restarts.
-- **On-demand metering via `pipewire-pulse`**: Level meters connect directly to the `pipewire-pulse` native socket with peak-detect streams only for the nodes currently visible on screen. When a node scrolls out of view, meters are toggled off (`a`), or the terminal loses focus, its meter streams are closed and the render loop goes quiet so that laptops can save on battery power.
+- **On-demand metering via `pipewire-pulse`**: Level meters connect directly to the `pipewire-pulse` native socket with peak-detect streams only for the nodes currently visible on screen, and only for streams that are playing or recording. When a node scrolls out of view, meters are toggled off (`a`), or the terminal loses focus, its meter streams are closed and the render loop goes quiet so that laptops can save on battery power.
 - **MPRIS matching over D-Bus**: Watches `org.mpris.MediaPlayer2` players on the session bus and matches them to PipeWire streams by process ID (walking ancestor PIDs so multi-process browsers match their audio streams).

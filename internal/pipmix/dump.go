@@ -99,7 +99,7 @@ func dump(ctx context.Context, w io.Writer, logs *logBuffer, flags *flag.FlagSet
 	fmt.Fprintln(w, "\n[pulse]")
 	targets := make(map[uint32]pulse.Target)
 	for i := range s.Nodes {
-		if t, ok := meterTarget(&s.Nodes[i]); ok {
+		if t, ok := meterTarget(s, &s.Nodes[i]); ok {
 			targets[s.Nodes[i].ID] = t
 		}
 	}
