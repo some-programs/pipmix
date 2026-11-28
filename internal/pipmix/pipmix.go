@@ -75,16 +75,14 @@ func Run(args []string) error {
 		go media.Run(ctx)
 	}
 
-	var meter *pulse.Meter
-	if opts.meters != metersOff {
-		meter = pulse.NewMeter(clientLog, opts.meterRate)
-		go meter.Run(ctx)
-	}
+	// The meter always runs, also with -meter.enable=false, for the hide
+	// rules that listen to levels. It connects to pipewire-pulse only while
+	// it has a node to measure.
+	meter := pulse.NewMeter(clientLog, opts.meterRate)
+	go meter.Run(ctx)
 
 	client := pw.NewClient(clientLog)
-	if meter != nil {
-		meter.JACKReady = client.JackMeterReady
-	}
+	meter.JACKReady = client.JackMeterReady
 	go client.Run(ctx)
 	if debug.dump {
 		return dump(ctx, os.Stdout, &dumpLog, fs, opts, hide, client, media, meter)

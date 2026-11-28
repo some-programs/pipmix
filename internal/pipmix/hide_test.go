@@ -19,8 +19,9 @@ recording = "all"
 
 [[default.hide]]
 match = { type = "playback", name = "^FluidSynth$" }
-when = "muted"
+when = "silent"
 after = "30s"
+threshold = -20 # 20*log10(10^(-20/20)) isn't -20
 
 [[default.hide]]
 match = { binary = "firefox" }
@@ -38,7 +39,7 @@ match = { description = "HDMI" }
 		got = append(got, r.String())
 	}
 	want := []string{
-		`match = { type = "playback", name = "^FluidSynth$" }, when = "muted", after = "30s"`,
+		`match = { type = "playback", name = "^FluidSynth$" }, when = "silent", after = "30s", threshold = -20`,
 		`match = { binary = "firefox" }, when = "idle", after = "10s"`,
 		`match = { description = "HDMI" }, when = "always"`,
 	}
@@ -59,10 +60,12 @@ func TestLoadHideRulesErrors(t *testing.T) {
 		{"unknown rule key", "[[default.hide]]\nmatch = { name = \"x\" }\nwen = \"idle\"\n", "config 3:1: unknown key wen"},
 		{"bad regexp", "[[default.hide]]\nmatch = { name = \"(x\" }\n", "config 2:18: toml: error parsing regexp"},
 		{"bad type", "[[default.hide]]\nmatch = { type = \"sink\" }\n", `type "sink": want one of playback, recording, output, input`},
-		{"bad when", "[[default.hide]]\nmatch = { name = \"x\" }\nwhen = \"quiet\"\n", `when "quiet": want one of always, idle, muted`},
+		{"bad when", "[[default.hide]]\nmatch = { name = \"x\" }\nwhen = \"quiet\"\n", `when "quiet": want one of always, idle, silent, muted`},
 		{"bad after", "[[default.hide]]\nmatch = { name = \"x\" }\nwhen = \"idle\"\nafter = \"-1s\"\n", `want 0 or more`},
 		{"empty match", "[[default.hide]]\nwhen = \"idle\"\n", "number 1: match: want at least one of type, name, description, app, binary"},
 		{"after with always", "[[default.hide]]\nmatch = { name = \"x\" }\nafter = \"1s\"\n", `after: not used with when = "always"`},
+		{"threshold without silent", "[[default.hide]]\nmatch = { name = \"x\" }\nwhen = \"idle\"\nthreshold = -50\n", "threshold: only used"},
+		{"threshold above 0", "[[default.hide]]\nmatch = { name = \"x\" }\nwhen = \"silent\"\nthreshold = 3\n", "want 0 dBFS or less"},
 		{"second rule", "[[default.hide]]\nmatch = { name = \"x\" }\n[[default.hide]]\n", "number 2: match"},
 	} {
 		_, err := loadHideRules(writeConfigFile(t, tc.toml))

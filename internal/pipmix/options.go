@@ -98,7 +98,7 @@ func addFlags(fs *flag.FlagSet) *flagValues {
 		jackEnable:  o.jack,
 	}
 	fs.String("config", defaultConfigPath(), "read config from `file`")
-	fs.BoolVar(&v.meterEnable, "meter.enable", v.meterEnable, "level meters and pipewire-pulse connection")
+	fs.BoolVar(&v.meterEnable, "meter.enable", v.meterEnable, "draw level meters; if false, pipewire-pulse is only used for hide rules with when = \"silent\"")
 	fs.BoolVar(&v.meterAlways, "meter.always", v.meterAlways, "meter while the terminal isn't focused too")
 	fs.IntVar(&v.meterRate, "meter.rate", v.meterRate, "peaks a second per meter, 1 to 200; above ~46 PipeWire may shorten its quantum for all audio")
 	fs.Var(&choice[meterMode]{&v.meterMode, meterModeFlags}, "meter.mode", "meter `mode`: both (the average, and a cell at the peak), average, or peak")

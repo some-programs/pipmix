@@ -313,6 +313,29 @@ func TestMeterWaitOnce(t *testing.T) {
 	}
 }
 
+func TestMeterBlurClearsLevels(t *testing.T) {
+	for _, ticking := range []bool{false, true} {
+		m := testMixer()
+		m.snap = meterSnapshot()
+		m.refocus()
+		it := m.items(tabPlayback)[0]
+		snap := &pulse.Snapshot{Averages: map[uint32][]float64{it.id: {0.5, 0.5}}}
+		m.setLevels(snap, time.Now())
+		m.setLevels(snap, time.Now().Add(time.Second)) // faded in
+		if m.level(it, -1) == 0 {
+			t.Fatal("no level to clear")
+		}
+		m.ticking, m.redraw = ticking, false
+		m.update(tui.BlurEvent{})
+		if ticking {
+			m.tickMetering()
+		}
+		if l := m.level(it, -1); l != 0 || !m.redraw || m.ticking {
+			t.Errorf("ticking %v, after blur: level %v, redraw %v, ticking %v; want 0, true, false", ticking, l, m.redraw, m.ticking)
+		}
+	}
+}
+
 func TestRecordingMeterTarget(t *testing.T) {
 	s := &pw.Snapshot{Nodes: []pw.Node{
 		{ID: 1, Class: pw.Source, Name: "mic", Channels: stereo(1)},

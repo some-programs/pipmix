@@ -107,9 +107,10 @@ func dump(ctx context.Context, w io.Writer, logs *logBuffer, flags *flag.FlagSet
 			targets[s.Nodes[i].ID] = t
 		}
 	}
-	if meter == nil {
-		fmt.Fprintln(w, "off")
-	} else if err := probePulse(ctx); err != nil {
+	if opts.meters == metersOff {
+		fmt.Fprintln(w, "meters are not drawn: -meter.enable=false")
+	}
+	if err := probePulse(ctx); err != nil {
 		fmt.Fprintf(w, "not connected: %v\n", err)
 		failed = append(failed, "pulse")
 	} else {

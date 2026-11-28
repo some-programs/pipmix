@@ -110,11 +110,17 @@ func run(ctx context.Context, m *mixer) error {
 				full = true
 			}
 		case msg := <-msgs:
-			if _, ok := msg.(quitMsg); ok {
+			switch msg.(type) {
+			case quitMsg:
 				return nil
+			case meterMsg:
+				// New levels redraw the meters, if they show.
+				exec(m.update(msg))
+				meters = meters || !m.metersOff()
+			default:
+				exec(m.update(msg))
+				full = true
 			}
-			exec(m.update(msg))
-			full = true
 		case <-tickC:
 			exec(m.tickMetering())
 			meters = true

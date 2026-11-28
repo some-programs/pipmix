@@ -82,9 +82,19 @@ func TestMetersAlways(t *testing.T) {
 		t.Error("A back to always: no targets while not focused")
 	}
 
+	// -meter.enable=false: no meter is drawn or metered, focused or not, and
+	// the keys that turn meters on leave them off.
 	o.meters = metersOff
-	if m := newMixer(pw.NewClient(nil), nil, pulse.NewMeter(nil, 0), quitKeys(), o); m.meter != nil {
-		t.Error("-meter.enable=false: the mixer has a meter")
+	m = newMixer(pw.NewClient(nil), nil, pulse.NewMeter(nil, 0), quitKeys(), o)
+	m.snap = meterSnapshot()
+	m.setSize(60, 20)
+	m.handleKey("a")
+	m.handleKey("A")
+	if got := m.meterTargets(); len(got) != 0 {
+		t.Errorf("-meter.enable=false: targets %v, want none", targetKeys(got))
+	}
+	if got := m.look(); got != meterOff {
+		t.Errorf("-meter.enable=false: look %v, want meterOff", got)
 	}
 }
 
