@@ -480,6 +480,12 @@ func (s *session) registryEvent(op uint8, f *parser) error {
 func (s *session) global(id uint32, typ string, version int32, props map[string]string) {
 	switch typ {
 	case ifaceClient:
+		if alsaClient(props) {
+			if name := localProcessName(props); name != "" {
+				props = maps.Clone(props)
+				props[PropProcessName] = name
+			}
+		}
 		s.clients[id] = props
 		s.clientsGen++
 	case ifaceNode:
@@ -1197,6 +1203,35 @@ func (s *session) setDefault(id uint32) {
 	s.dirty = true
 }
 
+// alsaClient reports whether a client's registry properties are those of
+// PipeWire's ALSA plugin. The registry leaves out client.api, but the plugin
+// names the application "PipeWire ALSA [binary]".
+func alsaClient(props map[string]string) bool {
+	return props[propClientAPI] == "alsa" || strings.HasPrefix(props[propApplicationName], "PipeWire ALSA [")
+}
+
+// localProcessName returns the name of a client's process, if it runs on
+// this host. PipeWire takes pipewire.sec.pid from the client's socket.
+var localProcessName = func(props map[string]string) string {
+	pid, err := strconv.Atoi(props["pipewire.sec.pid"])
+	if err != nil {
+		pid, err = strconv.Atoi(props[propApplicationProcessID])
+		if host := props["application.process.host"]; host != "" {
+			if h, herr := os.Hostname(); herr != nil || h != host {
+				return ""
+			}
+		}
+	}
+	if err != nil || pid <= 0 {
+		return ""
+	}
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
 // metering reports whether n only measures levels, as pipmix's meters and
 // the monitor streams of other mixers do.
 func metering(n *node) bool {
@@ -1316,7 +1351,7 @@ func (s *session) nodeView(n *node, now time.Time) Node {
 		if clientID, err := strconv.ParseUint(n.props["client.id"], 10, 32); err == nil {
 			if cp := s.clients[uint32(clientID)]; cp != nil {
 				cloned := false
-				for _, k := range []string{propApplicationProcessID, propApplicationName} {
+				for _, k := range []string{propApplicationProcessID, propApplicationName, PropProcessName} {
 					if _, ok := props[k]; !ok {
 						if val := cp[k]; val != "" {
 							if !cloned {
@@ -1340,9 +1375,13 @@ func (s *session) nodeView(n *node, now time.Time) Node {
 		State: n.state,
 		Route: -1,
 	}
-	v.Client = cmp.Or(props[propNodeDescription], v.Name, props[propApplicationName])
+	v.Client = cmp.Or(props[PropProcessName], props[propNodeDescription], v.Name, props[propApplicationName])
 	v.Title = v.Client
-	if media := props[propMediaName]; media != "" && media != v.Title {
+	media := props[propMediaName]
+	if props[PropProcessName] != "" && (media == "ALSA Playback" || media == "ALSA Capture") {
+		media = "" // the ALSA plugin's default, which says nothing
+	}
+	if media != "" && media != v.Title {
 		v.Title += ": " + media
 	}
 	if n.known {

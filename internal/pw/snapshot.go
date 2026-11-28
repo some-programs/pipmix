@@ -47,6 +47,11 @@ type Node struct {
 	From, To []uint32
 }
 
+// PropProcessName is the property in Node.Props that names the local
+// process of a stream from PipeWire's ALSA plugin, which names its streams
+// generically. pipmix reads it from /proc.
+const PropProcessName = "pipmix.process.name"
+
 // A State is a node's processing state.
 type State int
 
