@@ -126,7 +126,10 @@ func dump(ctx context.Context, w io.Writer, logs *logBuffer, flags *flag.FlagSet
 func dumpNodes(w io.Writer, s *pw.Snapshot, shown map[uint32]bool, opts options) {
 	classes := []string{"playback", "recording", "sink", "source"}
 	for _, n := range s.Nodes {
-		fmt.Fprintf(w, "node %d %s %q (%s)", n.ID, classes[n.Class], n.Title, n.Name)
+		fmt.Fprintf(w, "node %d %s %q (%s) %s", n.ID, classes[n.Class], n.Title, n.Name, n.State)
+		if n.Active {
+			fmt.Fprint(w, " active")
+		}
 		if n.Default {
 			fmt.Fprint(w, " default")
 		}

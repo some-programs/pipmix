@@ -71,6 +71,7 @@ func run(ctx context.Context, m *mixer) error {
 		frame  = time.Second / time.Duration(m.opts.fps)
 		ticker = time.NewTicker(frame)
 		timer  = time.NewTimer(frame)
+		wake   = time.NewTimer(time.Hour)
 		tickC  <-chan time.Time // the ticker's channel while the meters move
 		frameC <-chan time.Time // the timer's channel while a frame waits
 		sized  bool             // the size of the terminal is known
@@ -80,6 +81,7 @@ func run(ctx context.Context, m *mixer) error {
 	)
 	ticker.Stop()
 	timer.Stop()
+	wake.Stop()
 	for {
 		select {
 		case <-done:
@@ -119,6 +121,19 @@ func run(ctx context.Context, m *mixer) error {
 		case <-frameC:
 			frameC = nil
 			m.flushDrag(false)
+		case <-wake.C:
+			m.refreshShown(time.Now())
+		}
+
+		if m.redraw {
+			m.redraw = false
+			full = true
+		}
+		// Set the wake timer to the time updateShown last asked for.
+		if m.act.wakeAt.IsZero() {
+			wake.Stop()
+		} else {
+			wake.Reset(time.Until(m.act.wakeAt))
 		}
 
 		if m.ticking != (tickC != nil) {

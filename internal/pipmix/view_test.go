@@ -96,7 +96,9 @@ func TestShortDeviceName(t *testing.T) {
 }
 
 func TestStreamLabels(t *testing.T) {
-	m := newMixer(pw.NewClient(nil), nil, nil, quitKeys(), defaultOptions())
+	o := defaultOptions()
+	o.recording = showAll
+	m := newMixer(pw.NewClient(nil), nil, nil, quitKeys(), o)
 	chrome := map[string]string{"application.process.id": "14744"}
 	m.snap = &pw.Snapshot{Connected: true, Nodes: []pw.Node{
 		{ID: 35, Class: pw.Sink, Name: "duo", Title: "DUO-CAPTURE EX Analog Stereo", Channels: stereo(1), Default: true},

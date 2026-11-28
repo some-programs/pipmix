@@ -28,7 +28,7 @@ const (
 
 var tabNames = [tabCount]string{"Default", "Playback", "Recording", "Output Devices", "Input Devices", "Cards"}
 
-var tabClasses = [tabCards][]pw.Class{{pw.Sink, pw.Playback}, {pw.Playback}, {pw.Recording}, {pw.Sink}, {pw.Source}}
+var tabClasses = [tabCards][]pw.Class{{pw.Sink, pw.Playback, pw.Recording, pw.Source}, {pw.Playback}, {pw.Recording}, {pw.Sink}, {pw.Source}}
 
 type item struct {
 	id     uint32
@@ -133,6 +133,8 @@ type mixer struct {
 	meterMode    meterMode
 	quitKeys     section
 	opts         options
+	act          activity
+	redraw       bool // the screen needs drawing for a change made outside update
 
 	tab      tab
 	focus    [tabCount]focus
@@ -280,6 +282,7 @@ func (m *mixer) update(msg message) command {
 	case snapshotMsg:
 		m.snap = m.client.Snapshot()
 		m.findMedia()
+		m.updateShown(time.Now())
 		items := m.refocus()
 		m.watchMetersItems(items)
 		return m.waitSnapshot()
@@ -316,9 +319,10 @@ func (m *mixer) update(msg message) command {
 }
 
 // items returns the items for tab t, with the default device first and JACK
-// clients last.
+// clients last. The Default tab lists other output devices below those,
+// then input devices, then recording streams.
 func (m *mixer) items(t tab) []item {
-	var items, fixed []item
+	var items, fixed, outputs, inputs, recording []item
 	if t == tabCards {
 		for i := range m.snap.Cards {
 			c := &m.snap.Cards[i]
@@ -328,7 +332,7 @@ func (m *mixer) items(t tab) []item {
 	}
 	for i := range m.snap.Nodes {
 		n := &m.snap.Nodes[i]
-		if !slices.Contains(tabClasses[t], n.Class) || t == tabDefault && n.Class == pw.Sink && !n.Default || n.JACK && !m.opts.jack {
+		if !m.listed(t, n) {
 			continue
 		}
 		var player *mpris.Player
@@ -337,6 +341,16 @@ func (m *mixer) items(t tab) []item {
 		}
 		it := item{id: n.ID, node: n, media: m.mediaTitles[n.ID], player: player}
 		switch {
+		case t == tabDefault && n.Class == pw.Sink && !n.Default:
+			outputs = append(outputs, it)
+		case t == tabDefault && n.Class == pw.Source:
+			if n.Default {
+				inputs = slices.Insert(inputs, 0, it)
+			} else {
+				inputs = append(inputs, it)
+			}
+		case t == tabDefault && n.Class == pw.Recording:
+			recording = append(recording, it)
 		case n.JACK:
 			fixed = append(fixed, it)
 		case n.Default:
@@ -355,7 +369,31 @@ func (m *mixer) items(t tab) []item {
 	if m.opts.dedup {
 		all = filterDuplicates(all)
 	}
-	return groupStreams(all)
+	all = groupStreams(all)
+	if t != tabDefault {
+		return all
+	}
+	return slices.Concat(all, outputs, inputs, groupStreams(recording))
+}
+
+// listed reports whether tab t lists node n.
+func (m *mixer) listed(t tab, n *pw.Node) bool {
+	if !slices.Contains(tabClasses[t], n.Class) || n.JACK && !m.opts.jack {
+		return false
+	}
+	if t != tabDefault {
+		return true
+	}
+	if !listable(n) {
+		return false
+	}
+	switch m.defaultShow(n) {
+	case showAll:
+		return true
+	case showActive:
+		return m.act.shown[n.ID]
+	}
+	return false
 }
 
 // streamGroupKey returns a key that is equal for streams that belong in
