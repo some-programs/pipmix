@@ -3,6 +3,9 @@ package pipmix
 import (
 	"fmt"
 	"math"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
@@ -317,15 +320,46 @@ type tabLayout struct {
 	items     []item
 	focus     int
 	portWidth int
+	outputs   bool // playback streams play to more than one node
+	short     bool // stream labels use short device names
 }
 
 func (m *mixer) tabLayout(t tab) tabLayout {
 	items := m.items(t)
-	return tabLayout{
+	l := tabLayout{
 		items:     items,
 		focus:     m.focusIndex(t, items),
 		portWidth: m.portWidth(items),
+		outputs:   playbackOutputs(m.snap) > 1,
 	}
+	// If one stream's label doesn't fit beside its title, all are short.
+	room := m.labelRoom()
+	for _, it := range items {
+		if label := m.streamLabel(it, l.outputs, false); label != "" &&
+			ansi.StringWidth(shownTitle(it))+1+ansi.StringWidth(label) > room {
+			l.short = true
+			break
+		}
+	}
+	return l
+}
+
+// shownTitle returns the title drawn on the title line of it: its group's,
+// if grouped.
+func shownTitle(it item) string {
+	if it.groupCount > 1 && it.groupTitle != "" {
+		return it.groupTitle
+	}
+	return it.title()
+}
+
+// labelRoom returns the width that a stream's title and label share.
+func (m *mixer) labelRoom() int {
+	room := max(0, m.innerWidth()-toolbarWidth)
+	if t := m.tagsWidth(); t > 0 {
+		room -= t + 1
+	}
+	return room
 }
 
 func (l tabLayout) isGroupMuted(it item) bool {
@@ -446,6 +480,73 @@ func (m *mixer) titleColumns(width, portW int) (title, port int) {
 	return max(rest, 0), port
 }
 
+// playbackOutputs returns how many nodes playback streams play to.
+func playbackOutputs(s *pw.Snapshot) int {
+	var seen []uint32
+	for i := range s.Nodes {
+		n := &s.Nodes[i]
+		if n.Class != pw.Playback || n.JACK {
+			continue
+		}
+		for _, id := range n.To {
+			if !slices.Contains(seen, id) {
+				seen = append(seen, id)
+			}
+		}
+	}
+	return len(seen)
+}
+
+// streamLabel returns what stream it records from or, if outputs is set,
+// plays to, as a label for its title line. short shortens device names.
+func (m *mixer) streamLabel(it item, outputs, short bool) string {
+	n := it.node
+	if n == nil || n.JACK {
+		return ""
+	}
+	var ids []uint32
+	var many string
+	switch {
+	case n.Class == pw.Recording:
+		ids, many = n.From, "sources"
+	case n.Class == pw.Playback && outputs:
+		ids, many = n.To, "outputs"
+	default:
+		return ""
+	}
+	switch len(ids) {
+	case 0:
+		return ""
+	case 1:
+	default:
+		return strconv.Itoa(len(ids)) + " " + many
+	}
+	other := snapNode(m.snap, ids[0])
+	if other == nil {
+		return ""
+	}
+	name := other.Title
+	if short {
+		name = shortDeviceName(name)
+	}
+	if n.Class == pw.Recording && other.Class == pw.Sink {
+		return "monitor of " + name
+	}
+	return name
+}
+
+// profileSuffix matches the profile PipeWire appends to device names, such
+// as " Analog Stereo" or " Mono", before any parenthesized detail.
+var profileSuffix = regexp.MustCompile(`(?:\s+(?:Analog|Digital|Pro))?\s+(?:Stereo|Mono|Surround \d+(?:\.\d+)?)(\s+\(.*\))?$`)
+
+// shortDeviceName returns device name without the profile PipeWire appends.
+func shortDeviceName(name string) string {
+	if short := profileSuffix.ReplaceAllString(name, "$1"); short != "" {
+		return short
+	}
+	return name
+}
+
 func portText(it item) string {
 	if it.node == nil || len(it.node.Routes) == 0 {
 		return ""
@@ -479,10 +580,7 @@ func (m *mixer) drawToolbar(p *tui.Pen, it item, focused bool, layout tabLayout)
 
 // drawTitle draws the title line of it into p, which spans the inner width.
 func (m *mixer) drawTitle(p *tui.Pen, it item, focused bool, layout tabLayout) {
-	title := it.title()
-	if it.groupCount > 1 && it.groupTitle != "" {
-		title = it.groupTitle
-	}
+	title := shownTitle(it)
 	titleStyle := plain
 	if focused {
 		titleStyle = focusTitleStyle
@@ -503,6 +601,18 @@ func (m *mixer) drawTitle(p *tui.Pen, it item, focused bool, layout tabLayout) {
 			return
 		}
 		titleW, portW = m.titleColumns(avail, layout.portWidth)
+	} else if label := m.streamLabel(it, layout.outputs, layout.short); label != "" {
+		// Streams show what they play to or record from, at the right, up
+		// to the tag column of devices.
+		room := m.labelRoom()
+		lw := min(ansi.StringWidth(label), room-1-min(minTitle, room/2))
+		if lw >= minPortRoom {
+			p.Fit(title, room-lw-1, titleStyle, plain)
+			p.Text(" ", plain)
+			p.Fit(label, lw, dimStyle, dimStyle)
+			p.Pad(plain)
+			return
+		}
 	}
 	p.Fit(title, titleW, titleStyle, plain)
 	if portW > 0 {
