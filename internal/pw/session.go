@@ -84,6 +84,7 @@ type node struct {
 	volumes        []float32         // current channel volumes (linear)
 	channels       []uint32          // channel map positions (e.g. FL, FR)
 	mute           bool              // true if node is muted
+	state          State             // processing state from last Node::info event
 	pendingVolumes []float32         // last volume set by client while pending
 	pendingMute    *bool             // last mute state set by client while pending
 	pendingUntil   time.Time         // deadline until client pending values win
@@ -123,6 +124,11 @@ type enumReq struct {
 	values []pod  // collected reply pods
 }
 
+// A link connects an output node to an input node.
+type link struct {
+	out, in uint32 // global IDs of the nodes
+}
+
 type portInfo struct {
 	id     uint32 // PipeWire registry global ID of the port
 	node   uint32 // node ID this port belongs to
@@ -152,6 +158,7 @@ type session struct {
 	proxies     map[uint32]*proxy            // proxy ID → proxy object
 	nodes       map[uint32]*node             // global ID → audio node
 	ports       map[uint32]portInfo          // global ID → audio port info
+	links       map[uint32]link              // global ID → link between nodes
 	jackMeters  map[string]*jackMeter        // meter node name → JACK meter tracker
 	meters      map[uint32]*node             // global ID → meter stream nodes owned by this instance
 	meterPrefix string                       // prefix of meter stream nodes owned by this instance
@@ -182,6 +189,7 @@ func newSession(c *conn, logger *log.Logger, pid int) *session {
 		proxies:     make(map[uint32]*proxy),
 		nodes:       make(map[uint32]*node),
 		ports:       make(map[uint32]portInfo),
+		links:       make(map[uint32]link),
 		jackMeters:  make(map[string]*jackMeter),
 		meters:      make(map[uint32]*node),
 		meterPrefix: fmt.Sprintf("%s%d.", MeterPrefix, pid),
@@ -435,6 +443,13 @@ func (s *session) registryEvent(op uint8, f *parser) error {
 			}
 			return nil
 		}
+		if l, ok := s.links[id]; ok {
+			delete(s.links, id)
+			if s.linkCounts(l) {
+				s.dirty = true
+			}
+			return nil
+		}
 		delete(s.nodes, id)
 		delete(s.meters, id)
 		for name, jm := range s.jackMeters {
@@ -522,6 +537,11 @@ func (s *session) global(id uint32, typ string, version int32, props map[string]
 		outNode, err2 := strconv.ParseUint(props["link.output.node"], 10, 32)
 		if err1 != nil || err2 != nil {
 			return
+		}
+		l := link{out: uint32(outNode), in: uint32(inNode)}
+		s.links[id] = l
+		if s.linkCounts(l) {
+			s.dirty = true
 		}
 		for _, jm := range s.jackMeters {
 			if jm.node == uint32(inNode) && uint32(outNode) != jm.target {
@@ -675,12 +695,18 @@ func (s *session) nodeEvent(p *proxy, op uint8, f *parser) error {
 		change := f.long()
 		inPorts := f.int()
 		outPorts := f.int()
-		f.u32() // state
-		f.string()
+		state := State(f.int())
+		f.string() // error
 		props := f.dict()
 		params := f.paramInfo()
 		if f.err != nil {
 			return f.err
+		}
+		if change&nodeChangeState != 0 && state != n.state {
+			n.state = state
+			if !n.meter {
+				s.dirty = true
+			}
 		}
 		if inPorts != n.inPorts || outPorts != n.outPorts {
 			n.inPorts, n.outPorts = inPorts, outPorts
@@ -1171,15 +1197,93 @@ func (s *session) setDefault(id uint32) {
 	s.dirty = true
 }
 
+// metering reports whether n only measures levels, as pipmix's meters and
+// the monitor streams of other mixers do.
+func metering(n *node) bool {
+	return n.meter || n.props[propStreamMonitor] == "true"
+}
+
+// linkCounts reports whether adding or removing l can change a snapshot.
+// That is the case if at least one end is a node pipmix tracks and neither
+// end is a level meter. Meter links are ignored because they are created and
+// removed every time the set of metered nodes changes.
+func (s *session) linkCounts(l link) bool {
+	in, out := s.nodes[l.in], s.nodes[l.out]
+	return (in != nil || out != nil) && (in == nil || !metering(in)) && (out == nil || !metering(out))
+}
+
+// linkInfo walks the links once and returns what a snapshot needs from
+// them. Links with a level meter at either end are skipped.
+//
+//   - from maps each recording stream to the IDs of the nodes linked into
+//     it, sorted.
+//   - to maps each playback stream to the IDs of the nodes it is linked
+//     into, sorted.
+//   - active holds the devices that are running and linked to a running
+//     node. A linked node that pipmix doesn't track counts as running.
+func (s *session) linkInfo() (from, to map[uint32][]uint32, active map[uint32]bool) {
+	add := func(m map[uint32][]uint32, k, v uint32) map[uint32][]uint32 {
+		if m == nil {
+			m = make(map[uint32][]uint32)
+		}
+		if !slices.Contains(m[k], v) {
+			m[k] = append(m[k], v)
+		}
+		return m
+	}
+	// device marks node id active if it is a running device and peer, the
+	// node at the other end of the link, is running or untracked.
+	device := func(id uint32, n, peer *node) {
+		if n == nil || n.jack || n.class != Sink && n.class != Source || n.state != StateRunning {
+			return
+		}
+		if peer != nil && peer.state != StateRunning {
+			return
+		}
+		if active == nil {
+			active = make(map[uint32]bool)
+		}
+		active[id] = true
+	}
+	for _, l := range s.links {
+		if !s.linkCounts(l) {
+			continue
+		}
+		in, out := s.nodes[l.in], s.nodes[l.out]
+		if in != nil && !in.jack && in.class == Recording {
+			from = add(from, l.in, l.out)
+		}
+		if out != nil && !out.jack && out.class == Playback {
+			to = add(to, l.out, l.in)
+		}
+		device(l.in, in, out)
+		device(l.out, out, in)
+	}
+	for _, ids := range from {
+		slices.Sort(ids)
+	}
+	for _, ids := range to {
+		slices.Sort(ids)
+	}
+	return from, to, active
+}
+
 func (s *session) snapshot(now time.Time) *Snapshot {
 	snap := &Snapshot{Connected: true}
+	from, to, active := s.linkInfo()
 	for _, id := range slices.Sorted(maps.Keys(s.nodes)) {
 		n := s.nodes[id]
-		if n.meter || n.props[propStreamMonitor] == "true" {
+		if metering(n) {
 			continue
 		}
 		if !n.jack {
-			snap.Nodes = append(snap.Nodes, s.nodeView(n, now))
+			v := s.nodeView(n, now)
+			v.Active = n.state == StateRunning
+			if n.class == Sink || n.class == Source {
+				v.Active = active[id]
+			}
+			v.From, v.To = from[id], to[id]
+			snap.Nodes = append(snap.Nodes, v)
 			continue
 		}
 		for _, c := range []struct {
@@ -1188,7 +1292,7 @@ func (s *session) snapshot(now time.Time) *Snapshot {
 		}{{Playback, n.outPorts}, {Recording, n.inPorts}} {
 			if c.ports > 0 {
 				v := s.nodeView(n, now)
-				v.Class, v.JACK = c.class, true
+				v.Class, v.JACK, v.Active = c.class, true, n.state == StateRunning
 				if c.class == Playback {
 					for i, p := range s.nodePorts(n.id, true) {
 						name := cmp.Or(p.name, "CH"+strconv.Itoa(i+1))
@@ -1233,6 +1337,7 @@ func (s *session) nodeView(n *node, now time.Time) Node {
 		Class: n.class,
 		Name:  n.props[propNodeName],
 		Props: props,
+		State: n.state,
 		Route: -1,
 	}
 	v.Client = cmp.Or(props[propNodeDescription], v.Name, props[propApplicationName])
