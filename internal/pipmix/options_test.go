@@ -30,10 +30,11 @@ func TestFlags(t *testing.T) {
 	}
 	o, err = parseOptions("-meter.always", "-meter.rate", "20", "-meter.mode", "peak", "-meter.look", "dot", "-meter.speed", "slowest",
 		"-meter.peak-hold", "0", "-ui.fps", "30", "-mpris.enable=false", "-dedup.enable=false", "-volume.step", "2.5", "-volume.fine-step", "0.5",
-		"-volume.max", "100", "-ui.tab", "outputs", "-mouse.enable=false", "-jack.enable=false")
+		"-volume.max", "100", "-ui.tab", "outputs", "-mouse.enable=false", "-jack.enable=false",
+		"-default.recording", "all", "-default.outputs", "active", "-default.inputs", "all")
 	want := options{
 		meters: metersAlways, meterRate: 20, meterMode: modePeak, meterLook: meterDot, smoothing: 4, fps: 30,
-		step: 0.025, fineStep: 0.005, limit: 1, tab: tabOutputs,
+		step: 0.025, fineStep: 0.005, limit: 1, tab: tabOutputs, recording: showAll, outputs: showActive, inputs: showAll,
 	}
 	if err != nil || o != want {
 		t.Errorf("all flags: %+v, %v; want %+v", o, err, want)

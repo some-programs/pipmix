@@ -27,6 +27,8 @@ type options struct {
 	tab                   tab
 	mouse                 bool
 	jack                  bool
+	recording             showWhen
+	outputs, inputs       showWhen
 }
 
 func defaultOptions() options {
@@ -43,8 +45,23 @@ func defaultOptions() options {
 		limit:     1.5,
 		mouse:     true,
 		jack:      true,
+		recording: showActive,
 	}
 }
+
+// A showWhen says which nodes of a kind the Default tab shows.
+type showWhen int
+
+const (
+	showNone   showWhen = iota // none, or only the default output
+	showActive                 // those active, and for a while after
+	showAll                    // all
+)
+
+var (
+	showFlags   = []string{"off", "active", "all"}
+	outputFlags = []string{"default", "active", "all"}
+)
 
 type meterWhen int
 
@@ -97,6 +114,9 @@ func addFlags(fs *flag.FlagSet) *flagValues {
 	fs.Var(tabFlag{&v.tab}, "ui.tab", "`tab` to start on: "+strings.Join(tabFlags[:], ", ")+", or 1 to 6")
 	fs.BoolVar(&v.mouseEnable, "mouse.enable", v.mouseEnable, "use the mouse; disable to let terminal selection work")
 	fs.BoolVar(&v.jackEnable, "jack.enable", v.jackEnable, "list JACK clients")
+	fs.Var(&choice[showWhen]{&v.recording, showFlags}, "default.recording", "recording streams the Default tab shows, at the bottom: off, active (while recording, and a few seconds after), or all; JACK clients only show on the Recording tab")
+	fs.Var(&choice[showWhen]{&v.outputs, outputFlags}, "default.outputs", "output devices the Default tab shows: default, active (also others while in use, and a few seconds after), or all")
+	fs.Var(&choice[showWhen]{&v.inputs, showFlags}, "default.inputs", "input devices the Default tab shows, above recording streams: off, active (those in use, and a few seconds after), or all")
 	return v
 }
 

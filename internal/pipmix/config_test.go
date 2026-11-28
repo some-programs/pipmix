@@ -64,6 +64,11 @@ enable = false
 [jack]
 enable = false
 
+[default]
+recording = "off"
+outputs = "all"
+inputs = "active"
+
 [debug]
 log = true
 log-file = "/tmp/pipmix-test.log"
@@ -86,6 +91,9 @@ dump = true
 		fineStep:  0.005,
 		limit:     1.2,
 		tab:       tabOutputs,
+		recording: showNone,
+		outputs:   showAll,
+		inputs:    showActive,
 	}
 	if o != want {
 		t.Errorf("options:\ngot  %+v\nwant %+v", o, want)

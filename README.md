@@ -23,7 +23,7 @@ Press  ?  inside  pipmix  for context-sensitive key and mouse help.
 
 ## Features
 
-- **Default overview tab**: Keeps your default output device and active playback streams together in one view, alongside dedicated tabs for Playback, Recording, Output Devices, Input Devices, and Cards (`1`–`6` or `Tab`).
+- **Default overview tab**: Keeps your default output device and active playback streams together in one view, alongside dedicated tabs for Playback, Recording, Output Devices, Input Devices, and Cards (`1`–`6` or `Tab`). Which streams and devices it shows is configurable.
 - **Live level meters**: Smooth per-channel average and peak-hold meters directly inside the volume faders, automatically paused when the terminal loses focus.
 - **MPRIS media integration**: Displays currently playing track titles on playback streams, with controls to play/pause (`p`) or solo a stream (`s`).
 - **Full keyboard and mouse control**: Emacs and Vim-style keyboard navigation, per-channel volume unlocking (`Space`), port and card profile menus (`p`/`P`), default device switching (`D`), and click-and-drag faders.
@@ -65,6 +65,11 @@ enable = true     # disable to allow normal terminal text selection
 
 [jack]
 enable = true     # list JACK clients
+
+[default]
+recording = "active"  # recording streams on the Default tab: off, active (while recording, and 5s after), or all; JACK clients only show on the Recording tab
+outputs = "default"   # output devices: default, active (others too while in use, and 5s after), or all
+inputs = "off"        # input devices: off, active (those in use, and 5s after), or all
 ```
 
 ## Technical Details

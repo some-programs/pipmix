@@ -37,9 +37,12 @@ func deviceKeys() section {
 	}}
 }
 
-func defaultOutputKeys() section {
-	return section{"Default output", []binding{
+// defaultTabDeviceKeys are deviceKeys for the Default tab, where p also
+// plays or pauses a stream.
+func defaultTabDeviceKeys() section {
+	return section{"Devices", []binding{
 		{[]string{"p"}, "Choose the port", "click the port", (*mixer).portOrPlayPause},
+		{[]string{"D"}, "Make it the default", "", (*mixer).setDefault},
 	}}
 }
 
@@ -137,7 +140,7 @@ func (m *mixer) tabSections() []section {
 	var own []section
 	switch m.tab {
 	case tabDefault:
-		own = []section{volumeKeys(m.opts), defaultOutputKeys(), playbackKeys()}
+		own = []section{volumeKeys(m.opts), defaultTabDeviceKeys(), playbackKeys()}
 	case tabPlayback:
 		own = []section{volumeKeys(m.opts), playbackKeys()}
 	case tabOutputs, tabInputs:

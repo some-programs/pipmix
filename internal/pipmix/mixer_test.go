@@ -256,6 +256,10 @@ func TestHelp(t *testing.T) {
 			t.Errorf("help on Output Devices lacks %q:\n%s", want, view)
 		}
 	}
+	m.handleKey("1")
+	if view := ansi.Strip(m.view()); !strings.Contains(view, "Make it the default") {
+		t.Errorf("help on Default lacks D:\n%s", view)
+	}
 	m.handleKey("6") // the help follows the tab
 	if view := ansi.Strip(m.view()); !strings.Contains(view, "Choose the profile") || strings.Contains(view, "Louder") {
 		t.Errorf("help on Cards:\n%s", view)
@@ -762,7 +766,9 @@ func TestPlaybackGrouping(t *testing.T) {
 }
 
 func TestRecordingGrouping(t *testing.T) {
-	m := newMixer(pw.NewClient(nil), nil, nil, quitKeys(), defaultOptions())
+	o := defaultOptions()
+	o.recording = showAll
+	m := newMixer(pw.NewClient(nil), nil, nil, quitKeys(), o)
 	chrome := map[string]string{"application.process.id": "14744", "media.name": "RecordStream"}
 	m.snap = &pw.Snapshot{Connected: true, Nodes: []pw.Node{
 		{ID: 98, Class: pw.Recording, Name: "Google Chrome input", Client: "Google Chrome input", Title: "Google Chrome input: RecordStream", Props: chrome, From: []uint32{44}, Channels: stereo(1)},
@@ -772,7 +778,7 @@ func TestRecordingGrouping(t *testing.T) {
 	}}
 	m.setSize(80, 20)
 	m.refocus()
-	for _, tab := range []tab{tabRecording} {
+	for _, tab := range []tab{tabRecording, tabDefault} {
 		var recs []item
 		for _, it := range m.items(tab) {
 			switch {
