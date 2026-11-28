@@ -103,20 +103,52 @@ func (m *mixer) meterTargetsItems(items []item) map[uint32]pulse.Target {
 		if y <= off || top >= off+h {
 			continue
 		}
-		if t, ok := meterTarget(it.node); ok {
+		if !meterable(it.node) {
+			continue
+		}
+		if t, ok := meterTarget(m.snap, it.node); ok {
 			targets[it.id] = t
 		}
 	}
 	return targets
 }
 
-func meterTarget(n *pw.Node) (pulse.Target, bool) {
+// meterable reports whether n is worth metering now. Streams that aren't
+// active have no levels to show, and their meters can hold up PipeWire
+// starting other meters, so they get none.
+func meterable(n *pw.Node) bool {
+	if n == nil {
+		return false
+	}
+	switch n.Class {
+	case pw.Playback, pw.Recording:
+		return n.Active
+	}
+	return true
+}
+
+// meterTarget returns what to meter for node n of snapshot s. A recording
+// stream is metered at the node it records from, as its own levels can't be
+// read.
+func meterTarget(s *pw.Snapshot, n *pw.Node) (pulse.Target, bool) {
 	if n == nil || len(n.Channels) == 0 {
 		return pulse.Target{}, false
 	}
 	var names []string
 	for _, c := range n.Channels {
 		names = append(names, c.Name)
+	}
+	if n.Class == pw.Recording && !n.JACK {
+		if len(n.From) != 1 {
+			return pulse.Target{}, false
+		}
+		from := snapNode(s, n.From[0])
+		if from == nil || from.Class == pw.Recording {
+			return pulse.Target{}, false
+		}
+		t, ok := meterTarget(s, from)
+		t.Channels = names
+		return t, ok
 	}
 	t := pulse.Target{Name: n.Name, Channels: names}
 	switch {
@@ -288,12 +320,24 @@ func (m *mixer) meterNode(id uint32, raw []float64) *pw.Node {
 	return nil
 }
 
+// snapNode returns node id of s, or nil. JACK clients, listed twice under
+// one ID, are left out.
+func snapNode(s *pw.Snapshot, id uint32) *pw.Node {
+	for i := range s.Nodes {
+		if n := &s.Nodes[i]; n.ID == id && !n.JACK {
+			return n
+		}
+	}
+	return nil
+}
+
 // scale appends raw levels of n to dst on the cubic volume scale, applying
-// sink volume and mute state.
+// the volume and mute state of outputs and recording streams, whose levels
+// are measured before them.
 func scale(n *pw.Node, raw, dst []float64) []float64 {
 	for ch, l := range raw {
 		v := math.Cbrt(l)
-		if n.Class == pw.Sink {
+		if n.Class == pw.Sink || n.Class == pw.Recording && !n.JACK {
 			v *= n.Channels[ch].Volume
 		}
 		if n.Mute {

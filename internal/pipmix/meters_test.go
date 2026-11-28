@@ -16,10 +16,11 @@ func meterSnapshot() *pw.Snapshot {
 	s := testSnapshot()
 	for i := range 3 {
 		s.Nodes[i].Props = map[string]string{"object.serial": strconv.Itoa(100 + i)}
+		s.Nodes[i].Active = true
 	}
 	s.Nodes = append(s.Nodes,
 		pw.Node{ID: 40, Class: pw.Recording, Name: "rec", Title: "Recorder", Channels: stereo(1)},
-		pw.Node{ID: 41, Class: pw.Playback, Name: "jack", Title: "jackd", JACK: true, Channels: []pw.Channel{{Name: "out_1", Volume: 1}, {Name: "out_2", Volume: 1}}},
+		pw.Node{ID: 41, Class: pw.Playback, Name: "jack", Title: "jackd", JACK: true, Active: true, Channels: []pw.Channel{{Name: "out_1", Volume: 1}, {Name: "out_2", Volume: 1}}},
 		pw.Node{ID: 41, Class: pw.Recording, Name: "jack", Title: "jackd", JACK: true},
 		pw.Node{ID: 42, Class: pw.Source, Name: "mic", Title: "Mic", Channels: []pw.Channel{{Name: "MONO", Volume: 1}}},
 	)
@@ -48,6 +49,11 @@ func TestMeterTargets(t *testing.T) {
 	if !got[11].Equal(want) {
 		t.Errorf("target of 11 = %+v, want %+v", got[11], want)
 	}
+	m.snap.Nodes[1].Active = false
+	if keys := targetKeys(m.meterTargets()); !slices.Equal(keys, []uint32{10, 12, 41}) {
+		t.Errorf("targets with 11 idle %v, want 10 12 41", keys)
+	}
+	m.snap.Nodes[1].Active = true
 	wantJACK := pulse.Target{Kind: pulse.JACK, Serial: 41, Channels: []string{"out_1", "out_2"}}
 	if !got[41].Equal(wantJACK) {
 		t.Errorf("target of 41 = %+v, want %+v", got[41], wantJACK)
@@ -304,5 +310,35 @@ func TestMeterWaitOnce(t *testing.T) {
 	}
 	if cmd := m.update(tui.FocusEvent{}); cmd != nil {
 		t.Error("focus after the new wait: got a command, want none")
+	}
+}
+
+func TestRecordingMeterTarget(t *testing.T) {
+	s := &pw.Snapshot{Nodes: []pw.Node{
+		{ID: 1, Class: pw.Source, Name: "mic", Channels: stereo(1)},
+		{ID: 2, Class: pw.Sink, Name: "speakers", Channels: stereo(1)},
+		{ID: 3, Class: pw.Recording, Name: "claude", From: []uint32{1}, Channels: []pw.Channel{{Name: "MONO", Volume: 0.5}}},
+		{ID: 4, Class: pw.Recording, Name: "obs", From: []uint32{2}, Channels: stereo(1)},
+		{ID: 5, Class: pw.Recording, Name: "both", From: []uint32{1, 2}, Channels: stereo(1)},
+		{ID: 6, Class: pw.Recording, Name: "unlinked", Channels: stereo(1)},
+	}}
+	for _, tc := range []struct {
+		id   uint32
+		want pulse.Target
+		ok   bool
+	}{
+		{3, pulse.Target{Kind: pulse.Source, Name: "mic", Channels: []string{"MONO"}}, true},
+		{4, pulse.Target{Kind: pulse.Sink, Name: "speakers", Channels: []string{"FL", "FR"}}, true},
+		{5, pulse.Target{}, false},
+		{6, pulse.Target{}, false},
+	} {
+		got, ok := meterTarget(s, snapNode(s, tc.id))
+		if ok != tc.ok || ok && !got.Equal(tc.want) {
+			t.Errorf("node %d: %v, %v; want %v, %v", tc.id, got, ok, tc.want, tc.ok)
+		}
+	}
+	// The source's level, through the stream's volume.
+	if got := scale(&s.Nodes[2], []float64{1}, nil); len(got) != 1 || got[0] != 0.5 {
+		t.Errorf("recording at 50%% scaled to %v, want [0.5]", got)
 	}
 }
