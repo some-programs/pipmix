@@ -15,17 +15,22 @@ const activeLinger = 5 * time.Second
 // latest PipeWire snapshot. trackNodes rebuilds it on every new snapshot and
 // copies the timestamps over from the node's previous state.
 type nodeState struct {
-	active bool      // the node is active
-	idleAt time.Time // when the node went from active to not active; zero if that was never seen
+	known   bool      // the node's volume and mute have been reported
+	active  bool      // the node is active
+	idleAt  time.Time // when the node went from active to not active; zero if that was never seen
+	muted   bool      // the node is muted
+	mutedAt time.Time // when the node went from unmuted to muted; zero if that was never seen
+	rules   []int     // indexes in mixer.hide of the hide rules that match the node
 }
 
 // activity holds the state used to decide which nodes the Default tab
-// shows: which nodes are active, and since when they are not.
+// shows: which nodes are active or muted, and since when.
 type activity struct {
 	snap  *pw.Snapshot         // the PipeWire snapshot that nodes was built from
 	nodes map[uint32]nodeState // state of each listable node in snap, by node ID
 
 	shown  map[uint32]bool // nodes to show because they are active or stopped less than activeLinger ago
+	hidden map[uint32]bool // nodes that a hide rule currently hides
 	wakeAt time.Time       // the next time updateShown must run because a delay runs out; zero if none
 }
 
@@ -52,7 +57,9 @@ func (m *mixer) trackNodes(now time.Time) {
 		}
 		prev := a.nodes[n.ID]
 		st := nodeState{
+			known:  len(n.Channels) > 0,
 			active: n.Active,
+			muted:  n.Mute && !n.JACK,
 		}
 		switch {
 		case st.active:
@@ -60,6 +67,25 @@ func (m *mixer) trackNodes(now time.Time) {
 			st.idleAt = now
 		default:
 			st.idleAt = prev.idleAt
+		}
+		// PipeWire reports a new node as unmuted until it has sent the node's
+		// volume and mute. So mutedAt is only set if the node was unmuted in
+		// a snapshot where its mute was already known. A node that is muted
+		// when its mute first becomes known gets no mutedAt, and a muted rule
+		// hides it without waiting.
+		switch {
+		case !st.muted:
+		case prev.known && !prev.muted:
+			st.mutedAt = now
+		default:
+			st.mutedAt = prev.mutedAt
+		}
+		for ri := range m.hide {
+			r := &m.hide[ri]
+			if !r.Match.matches(n) {
+				continue
+			}
+			st.rules = append(st.rules, ri)
 		}
 		nodes[n.ID] = st
 	}
@@ -82,9 +108,9 @@ func (m *mixer) defaultShow(n *pw.Node) showWhen {
 }
 
 // updateShown takes in the current PipeWire snapshot if it is new, then
-// recomputes m.act.shown for the time now, and reports whether it changed.
-// It sets m.act.wakeAt to the earliest time at which the result can change
-// without a new snapshot.
+// recomputes m.act.shown and m.act.hidden for the time now, and reports
+// whether either changed. It sets m.act.wakeAt to the earliest
+// time at which the result can change without a new snapshot.
 func (m *mixer) updateShown(now time.Time) (changed bool) {
 	m.trackNodes(now)
 	a := &m.act
@@ -106,7 +132,7 @@ func (m *mixer) updateShown(now time.Time) (changed bool) {
 		return st.active || !st.idleAt.IsZero() && until(st.idleAt.Add(d))
 	}
 
-	var shown map[uint32]bool
+	var shown, hidden map[uint32]bool
 	for i := range m.snap.Nodes {
 		n := &m.snap.Nodes[i]
 		if !listable(n) {
@@ -119,10 +145,33 @@ func (m *mixer) updateShown(now time.Time) (changed bool) {
 			}
 			shown[n.ID] = true
 		}
+		hide := false
+		for _, ri := range st.rules {
+			r := &m.hide[ri]
+			switch r.When {
+			case hideAlways:
+				hide = true
+			case hideIdle:
+				hide = !active(st, r.after)
+			case hideMuted:
+				// With a zero mutedAt the delay has always run out, so the
+				// node hides at once.
+				hide = st.muted && !until(st.mutedAt.Add(r.after))
+			}
+			if hide {
+				break
+			}
+		}
+		if hide {
+			if hidden == nil {
+				hidden = make(map[uint32]bool)
+			}
+			hidden[n.ID] = true
+		}
 	}
 	a.wakeAt = next
-	changed = !maps.Equal(shown, a.shown)
-	a.shown = shown
+	changed = !maps.Equal(shown, a.shown) || !maps.Equal(hidden, a.hidden)
+	a.shown, a.hidden = shown, hidden
 	return changed
 }
 

@@ -39,7 +39,7 @@ func TestDumpNotConnected(t *testing.T) {
 	go meter.Run(ctx)
 
 	var out bytes.Buffer
-	err = dump(ctx, &out, &logBuffer{}, fs, opts, client, media, meter)
+	err = dump(ctx, &out, &logBuffer{}, fs, opts, nil, client, media, meter)
 	for _, want := range []string{"[pipewire]\nnot connected: ", "[mpris]\nnot connected: ", "[pulse]\nnot connected: "} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("dump lacks %q:\n%s", want, out.String())
