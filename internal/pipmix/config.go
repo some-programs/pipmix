@@ -26,6 +26,7 @@ func parseFlags(fs *flag.FlagSet, args []string) error {
 }
 
 // parseTOML is an ff.ConfigFileParser that maps [table] key to flag table.key.
+// It skips [[default.hide]], which loadHideRules reads.
 func parseTOML(r io.Reader, set func(name, value string) error) error {
 	var m map[string]map[string]any
 	if err := toml.NewDecoder(r).Decode(&m); err != nil {
@@ -37,6 +38,12 @@ func parseTOML(r io.Reader, set func(name, value string) error) error {
 	}
 	for _, table := range slices.Sorted(maps.Keys(m)) {
 		for _, key := range slices.Sorted(maps.Keys(m[table])) {
+			if table == "default" && key == "hide" {
+				if _, ok := m[table][key].([]any); !ok {
+					return errors.New("config: write [[default.hide]], with double brackets, for each hide rule")
+				}
+				continue
+			}
 			if err := set(table+"."+key, fmt.Sprint(m[table][key])); err != nil {
 				return err
 			}

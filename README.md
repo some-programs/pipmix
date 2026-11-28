@@ -72,6 +72,37 @@ outputs = "default"   # output devices: default, active (others too while in use
 inputs = "off"        # input devices: off, active (those in use, and 5s after), or all
 ```
 
+### Hide rules
+
+`[[default.hide]]` rules hide nodes from the Default tab; the other tabs still list everything. They can only be set in the config file. A node is hidden while any rule matching it says so, even when focused.
+
+```toml
+# Hide Firefox's streams while they don't run.
+[[default.hide]]
+match = { binary = "firefox" }
+when = "idle"
+
+# Hide playback streams as soon as they are muted.
+[[default.hide]]
+match = { type = "playback" }
+when = "muted"
+after = "0s"
+```
+
+- `match` selects nodes; every key given must match. `pipmix -debug.dump` lists the properties of each node, and the rules each node matches.
+  - `type`: `playback`, `recording`, `output`, or `input`.
+  - `name`: a regular expression on `node.name`.
+  - `description`: a regular expression on `node.description`.
+  - `app`: a regular expression on `application.name`, or on the process name of a stream from PipeWire's ALSA plugin.
+  - `binary`: a regular expression on `application.process.binary`.
+
+  Regular expressions are unanchored: `firefox` matches anywhere in the value, `^firefox$` only the whole value.
+- `when` says when matching nodes hide:
+  - `always` (the default): always.
+  - `idle`: while nothing plays or records through the node.
+  - `muted`: while the node is muted. A volume of 0% doesn't count.
+- `after` is how long `idle` or `muted` must last before the node hides; it is 10s unless set. A node shows again as soon as the condition ends, and nodes start out hidden if the condition already holds.
+
 ## Technical Details
 
 - **Pure Go PipeWire protocol implementation**: Speaks PipeWire's native SPA POD protocol directly over the PipeWire Unix socket to track graph state and control volumes, mutes, routes, card profiles, and default devices, reconnecting automatically if PipeWire restarts.

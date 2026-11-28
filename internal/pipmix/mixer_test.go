@@ -706,6 +706,14 @@ func TestDedupPlayback(t *testing.T) {
 	if items := m.items(tabPlayback); len(items) != 3 {
 		t.Errorf("different media titles: got %d items, want 3", len(items))
 	}
+
+	// A rule hiding the multi-channel stream doesn't bring its duplicate back.
+	m = newMixer(pw.NewClient(nil), nil, nil, quitKeys(), defaultOptions())
+	m.snap = snap
+	m.act.hidden = map[uint32]bool{10: true}
+	if items := m.items(tabDefault); len(items) != 1 || items[0].id != 12 {
+		t.Errorf("Default tab, multi-channel stream hidden: got items %v, want [12]", items)
+	}
 }
 
 func TestPlaybackGrouping(t *testing.T) {

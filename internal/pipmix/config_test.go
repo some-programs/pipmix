@@ -69,6 +69,9 @@ recording = "off"
 outputs = "all"
 inputs = "active"
 
+[[default.hide]] # read by loadHideRules, not as flags
+match = { name = "x" }
+
 [debug]
 log = true
 log-file = "/tmp/pipmix-test.log"
@@ -138,6 +141,7 @@ func TestConfigErrors(t *testing.T) {
 	}{
 		{"syntax error", "[volume\n", "config 1:"},
 		{"unknown key", "[volume]\nstpe = 5\n", `"volume.stpe" not defined`},
+		{"hide rule in single brackets", "[default.hide]\nmatch = { name = \"x\" }\n", "write [[default.hide]], with double brackets"},
 	} {
 		p := writeConfigFile(t, tc.toml)
 		_, _, err := parseAll("-config", p)

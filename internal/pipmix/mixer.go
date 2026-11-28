@@ -133,6 +133,7 @@ type mixer struct {
 	meterMode    meterMode
 	quitKeys     section
 	opts         options
+	hide         []hideRule // [[default.hide]] rules
 	act          activity
 	redraw       bool // the screen needs drawing for a change made outside update
 
@@ -322,7 +323,7 @@ func (m *mixer) update(msg message) command {
 // clients last. The Default tab lists other output devices below those,
 // then input devices, then recording streams.
 func (m *mixer) items(t tab) []item {
-	var items, fixed, outputs, inputs, recording []item
+	var items, fixed, outputs, inputs, recording, hidden []item
 	if t == tabCards {
 		for i := range m.snap.Cards {
 			c := &m.snap.Cards[i]
@@ -333,6 +334,10 @@ func (m *mixer) items(t tab) []item {
 	for i := range m.snap.Nodes {
 		n := &m.snap.Nodes[i]
 		if !m.listed(t, n) {
+			// A stream that a rule hides still has its duplicates dropped.
+			if t == tabDefault && n.Class == pw.Playback && m.act.hidden[n.ID] && m.listed(tabPlayback, n) {
+				hidden = append(hidden, item{id: n.ID, node: n, media: m.mediaTitles[n.ID]})
+			}
 			continue
 		}
 		var player *mpris.Player
@@ -367,7 +372,11 @@ func (m *mixer) items(t tab) []item {
 		return all
 	}
 	if m.opts.dedup {
-		all = filterDuplicates(all)
+		among := all
+		if len(hidden) > 0 {
+			among = slices.Concat(all, hidden)
+		}
+		all = filterDuplicates(all, among)
 	}
 	all = groupStreams(all)
 	if t != tabDefault {
@@ -384,7 +393,7 @@ func (m *mixer) listed(t tab, n *pw.Node) bool {
 	if t != tabDefault {
 		return true
 	}
-	if !listable(n) {
+	if !listable(n) || m.act.hidden[n.ID] {
 		return false
 	}
 	switch m.defaultShow(n) {
@@ -532,17 +541,18 @@ func (m *mixer) toggleGroupMute(groupKey string) {
 	}
 }
 
-// filterDuplicates returns items without mono playback streams that duplicate
-// a multi-channel stream from the same application or media.
-func filterDuplicates(items []item) []item {
+// filterDuplicates returns items without the mono playback streams that
+// duplicate a multi-channel stream in among, from the same application or
+// media.
+func filterDuplicates(items, among []item) []item {
 	for i, it := range items {
-		if !isDuplicate(it, items) {
+		if !isDuplicate(it, among) {
 			continue
 		}
 		filtered := make([]item, 0, len(items)-1)
 		filtered = append(filtered, items[:i]...)
 		for _, rest := range items[i+1:] {
-			if !isDuplicate(rest, items) {
+			if !isDuplicate(rest, among) {
 				filtered = append(filtered, rest)
 			}
 		}

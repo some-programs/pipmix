@@ -13,6 +13,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,7 +30,7 @@ var dumpEnv = []string{
 }
 
 // dump writes diagnostic information for -debug.dump.
-func dump(ctx context.Context, w io.Writer, logs *logBuffer, flags *flag.FlagSet, opts options, c *pw.Client, media *mpris.Watcher, meter *pulse.Meter) error {
+func dump(ctx context.Context, w io.Writer, logs *logBuffer, flags *flag.FlagSet, opts options, hide []hideRule, c *pw.Client, media *mpris.Watcher, meter *pulse.Meter) error {
 	fmt.Fprintln(w, "[build]")
 	dumpBuild(w)
 
@@ -45,6 +46,9 @@ func dump(ctx context.Context, w io.Writer, logs *logBuffer, flags *flag.FlagSet
 	flags.Visit(func(f *flag.Flag) {
 		fmt.Fprintf(w, "flag -%s=%s\n", f.Name, f.Value)
 	})
+	for i, r := range hide {
+		fmt.Fprintf(w, "default.hide %d: %v\n", i+1, r)
+	}
 
 	fmt.Fprintln(w, "\n[environment]")
 	for _, k := range dumpEnv {
@@ -74,7 +78,7 @@ func dump(ctx context.Context, w io.Writer, logs *logBuffer, flags *flag.FlagSet
 	for _, it := range m.items(tabPlayback) {
 		shown[it.id] = true
 	}
-	dumpNodes(w, s, shown, opts)
+	dumpNodes(w, s, shown, opts, hide)
 
 	fmt.Fprintln(w, "\n[mpris]")
 	switch {
@@ -123,10 +127,9 @@ func dump(ctx context.Context, w io.Writer, logs *logBuffer, flags *flag.FlagSet
 	return nil
 }
 
-func dumpNodes(w io.Writer, s *pw.Snapshot, shown map[uint32]bool, opts options) {
-	classes := []string{"playback", "recording", "sink", "source"}
+func dumpNodes(w io.Writer, s *pw.Snapshot, shown map[uint32]bool, opts options, hide []hideRule) {
 	for _, n := range s.Nodes {
-		fmt.Fprintf(w, "node %d %s %q (%s) %s", n.ID, classes[n.Class], n.Title, n.Name, n.State)
+		fmt.Fprintf(w, "node %d %s %q (%s) %s", n.ID, nodeTypeNames[n.Class], n.Title, n.Name, n.State)
 		if n.Active {
 			fmt.Fprint(w, " active")
 		}
@@ -141,13 +144,22 @@ func dumpNodes(w io.Writer, s *pw.Snapshot, shown map[uint32]bool, opts options)
 		}
 		fmt.Fprintln(w)
 		var props []string
-		for _, k := range []string{"object.serial", "application.process.id", "application.process.binary"} {
+		for _, k := range []string{"object.serial", "node.description", "application.name", pw.PropProcessName, "application.process.id", "application.process.binary"} {
 			if v := n.Props[k]; v != "" {
 				props = append(props, k+"="+v)
 			}
 		}
 		if len(props) > 0 {
 			fmt.Fprintf(w, "  %s\n", strings.Join(props, " "))
+		}
+		var rules []string
+		for i, r := range hide {
+			if listable(&n) && r.Match.matches(&n) {
+				rules = append(rules, strconv.Itoa(i+1))
+			}
+		}
+		if rules != nil {
+			fmt.Fprintf(w, "  matches default.hide %s\n", strings.Join(rules, ", "))
 		}
 		switch {
 		case n.Class != pw.Playback || shown[n.ID]:

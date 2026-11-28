@@ -40,6 +40,10 @@ func Run(args []string) error {
 	if err != nil {
 		return err
 	}
+	hide, err := loadHideRules(fs.Lookup("config").Value.String())
+	if err != nil {
+		return err
+	}
 	var clientLog *log.Logger
 	if debug.log {
 		f, err := openDebugLog(debug.logFile)
@@ -83,9 +87,10 @@ func Run(args []string) error {
 	}
 	go client.Run(ctx)
 	if debug.dump {
-		return dump(ctx, os.Stdout, &dumpLog, fs, opts, client, media, meter)
+		return dump(ctx, os.Stdout, &dumpLog, fs, opts, hide, client, media, meter)
 	}
 	m := newMixer(client, media, meter, quitKeys(), opts)
+	m.hide = hide
 	return run(ctx, &m)
 }
 
