@@ -191,3 +191,22 @@ func TestOpenDebugLog(t *testing.T) {
 		t.Errorf("log at %s, want %s", f.Name(), path)
 	}
 }
+
+func TestVersionCommandLineOnly(t *testing.T) {
+	t.Setenv("PIPMIX_VERSION", "1.4.0")
+	t.Setenv("PIPMIX_VERSION_INFO", "true")
+	args := []string{"-config", filepath.Join(t.TempDir(), "none.toml")}
+	fs := flag.NewFlagSet("pipmix", flag.ContinueOnError)
+	v := addVersionFlags(fs)
+	addFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	v.lock()
+	if err := parseFlags(fs, args); err != nil {
+		t.Fatalf("PIPMIX_VERSION in the environment: %v", err)
+	}
+	if v.print(io.Discard) {
+		t.Error("the environment set -version")
+	}
+}

@@ -24,11 +24,17 @@ func Run(args []string) error {
 	version := addVersionFlags(fs)
 	debug := addDebugFlags(fs)
 	values := addFlags(fs)
-	if err := parseFlags(fs, args); err != nil {
+	// The command line alone decides -version, so that PIPMIX_VERSION in the
+	// environment doesn't set it and a broken config file doesn't stop it.
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if version.print(os.Stdout) {
 		return nil
+	}
+	version.lock()
+	if err := parseFlags(fs, args); err != nil {
+		return err
 	}
 	opts, err := values.check()
 	if err != nil {
