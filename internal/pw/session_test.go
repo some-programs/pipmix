@@ -193,6 +193,38 @@ func TestActiveDevices(t *testing.T) {
 	}
 }
 
+func TestALSAClientName(t *testing.T) {
+	defer func(f func(map[string]string) string) { localProcessName = f }(localProcessName)
+	localProcessName = func(props map[string]string) string {
+		if props["pipewire.sec.pid"] == "135588" {
+			return "claude"
+		}
+		return ""
+	}
+	s := newSession(nil, nil, 1)
+	// The registry announces clients without client.api.
+	s.global(165, ifaceClient, 3, map[string]string{propApplicationName: "PipeWire ALSA [2.1.332]", "pipewire.sec.pid": "135588"})
+	s.global(166, ifaceClient, 3, map[string]string{propApplicationName: "pipmix", "pipewire.sec.pid": "135588"}) // not ALSA
+	view := func(client, media string) Node {
+		n := &node{id: 10, class: Recording, props: map[string]string{
+			"client.id": client, propNodeName: "alsa_capture.2.1.332",
+			propNodeDescription: "ALSA Capture [2.1.332]", propMediaName: media,
+		}}
+		return s.nodeView(n, time.Now())
+	}
+	for _, tc := range []struct {
+		client, media, wantClient, wantTitle string
+	}{
+		{"165", "ALSA Capture", "claude", "claude"},
+		{"165", "Dictation", "claude", "claude: Dictation"},
+		{"166", "ALSA Capture", "ALSA Capture [2.1.332]", "ALSA Capture [2.1.332]: ALSA Capture"},
+	} {
+		if v := view(tc.client, tc.media); v.Client != tc.wantClient || v.Title != tc.wantTitle {
+			t.Errorf("client %s, media %q: client %q, title %q; want %q, %q", tc.client, tc.media, v.Client, v.Title, tc.wantClient, tc.wantTitle)
+		}
+	}
+}
+
 func TestStreamLinks(t *testing.T) {
 	s := newSession(nil, nil, 1)
 	for _, n := range []*node{
