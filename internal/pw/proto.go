@@ -74,6 +74,7 @@ const (
 
 // Node::info and Device::info change mask bits.
 const (
+	nodeChangeState   = 1 << 2
 	nodeChangeProps   = 1 << 3
 	nodeChangeParams  = 1 << 4
 	deviceChangeProps = 1 << 0
