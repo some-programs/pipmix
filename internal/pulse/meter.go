@@ -2,12 +2,14 @@
 package pulse
 
 import (
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"net"
 	"os"
@@ -45,6 +47,11 @@ type Target struct {
 	Name     string // node.name of a Sink or Source
 	Serial   uint32 // object.serial of a Stream, or node ID of a JACK client
 	Channels []string
+
+	// Rate is how many peaks a second the target's stream sends, or 0 for
+	// the meter's own rate. At any rate, each peak is the highest level
+	// since the peak before it. A lower rate wakes this process less often.
+	Rate int
 }
 
 func (t Target) String() string {
@@ -60,6 +67,12 @@ func (t Target) String() string {
 }
 
 func (t Target) Equal(u Target) bool {
+	return t.Rate == u.Rate && t.sameNode(u)
+}
+
+// sameNode reports whether t and u measure the same channels of the same
+// node, at whatever rates.
+func (t Target) sameNode(u Target) bool {
 	return t.Kind == u.Kind && t.Name == u.Name && t.Serial == u.Serial && slices.Equal(t.Channels, u.Channels)
 }
 
@@ -90,7 +103,7 @@ type Meter struct {
 }
 
 // NewMeter returns a meter whose streams send rate peaks per second
-// (DefaultRate if rate <= 0).
+// (DefaultRate if rate <= 0), unless their Target sets a rate of its own.
 func NewMeter(logger *log.Logger, rate int) *Meter {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
@@ -134,10 +147,13 @@ func (m *Meter) Watch(targets map[uint32]Target) {
 	}
 }
 
-// A worker measures one target.
+// A worker measures one target, for all the keys watching it. Only
+// Meter.Run reads and writes keys and prev.
 type worker struct {
 	target Target
 	cancel context.CancelFunc
+	keys   []uint32 // the keys watching the target, sorted
+	prev   []uint32 // keys as it was before the Watch call being applied
 }
 
 // inlineChannels is the channel count carried inline in a level message
@@ -147,7 +163,6 @@ const inlineChannels = 8
 // A level is a worker's latest peaks and averages; n < 0 when it has none.
 type level struct {
 	w        *worker
-	key      uint32
 	n        int
 	peaksBuf [inlineChannels]float64
 	avgsBuf  [inlineChannels]float64
@@ -170,9 +185,11 @@ type meterState struct {
 	avgs   []float64
 }
 
-// Run measures until ctx is done.
+// Run measures until ctx is done. Keys watching equal targets share one
+// stream: two streams made at once on one source can leave PipeWire running
+// only the first for seconds.
 func (m *Meter) Run(ctx context.Context) {
-	workers := make(map[uint32]*worker)
+	var workers []*worker
 	states := make(map[uint32]*meterState)
 	updates := make(chan level, 64)
 	var published time.Time
@@ -190,49 +207,80 @@ func (m *Meter) Run(ctx context.Context) {
 			}
 			return
 		case targets := <-m.want:
-			for key, w := range workers {
-				if t, ok := targets[key]; !ok || !t.Equal(w.target) {
-					m.log.Printf("pulse: %v: unwatched", w.target)
-					w.cancel()
-					delete(workers, key)
-					if _, ok := states[key]; ok {
-						delete(states, key)
-						dirty = true
-					}
-				}
+			// Give each key to the worker with an equal target, starting
+			// a worker if there is none.
+			for _, w := range workers {
+				w.prev, w.keys = w.keys, nil
 			}
-			for key, t := range targets {
-				if workers[key] == nil {
+			for _, key := range slices.Sorted(maps.Keys(targets)) {
+				t := targets[key]
+				i := slices.IndexFunc(workers, func(w *worker) bool { return w.target.Equal(t) })
+				if i < 0 {
 					wctx, cancel := context.WithCancel(ctx)
 					w := &worker{target: t, cancel: cancel}
-					workers[key] = w
-					m.log.Printf("pulse: %v: watched as %d", t, key)
-					go m.measure(wctx, w, key, updates)
+					go m.measure(wctx, w, updates)
+					i = len(workers)
+					workers = append(workers, w)
 				}
+				workers[i].keys = append(workers[i].keys, key)
 			}
+			// Drop the levels of keys that left their worker, and stop the
+			// workers that no key watches any more. A key whose target only
+			// changed its rate stays in the snapshots while its stream is
+			// replaced, with levels of 0 until the new stream sends some.
+			// Readers take a missing key to mean that the meter has no levels for
+			// the node.
+			workers = slices.DeleteFunc(workers, func(w *worker) bool {
+				for _, key := range w.prev {
+					st, ok := states[key]
+					if !ok || slices.Contains(w.keys, key) {
+						continue
+					}
+					if t, ok := targets[key]; ok && t.sameNode(w.target) {
+						clear(st.latest)
+						clear(st.avgs)
+					} else {
+						delete(states, key)
+					}
+					dirty = true
+				}
+				if len(w.keys) == 0 {
+					m.log.Printf("pulse: %v: unwatched", w.target)
+					w.cancel()
+					return true
+				}
+				if !slices.Equal(w.keys, w.prev) {
+					m.log.Printf("pulse: %v: watched as %v", w.target, w.keys)
+				}
+				return false
+			})
 		case l := <-updates:
-			if workers[l.key] != l.w {
+			if !slices.Contains(workers, l.w) {
 				break // from a worker since cancelled
 			}
 			if l.n < 0 {
-				delete(states, l.key)
+				for _, key := range l.w.keys {
+					delete(states, key)
+				}
 			} else {
 				peaks, avg := l.slices()
-				st := states[l.key]
-				if st == nil || len(st.latest) != len(peaks) {
-					buf := make([]float64, 3*len(peaks))
-					st = &meterState{
-						latest: buf[:len(peaks)],
-						held:   buf[len(peaks) : 2*len(peaks)],
-						avgs:   buf[2*len(peaks):],
+				for _, key := range l.w.keys {
+					st := states[key]
+					if st == nil || len(st.latest) != len(peaks) {
+						buf := make([]float64, 3*len(peaks))
+						st = &meterState{
+							latest: buf[:len(peaks)],
+							held:   buf[len(peaks) : 2*len(peaks)],
+							avgs:   buf[2*len(peaks):],
+						}
+						states[key] = st
 					}
-					states[l.key] = st
+					copy(st.latest, peaks)
+					for i, v := range peaks {
+						st.held[i] = max(st.held[i], v)
+					}
+					copy(st.avgs, avg)
 				}
-				copy(st.latest, peaks)
-				for i, v := range peaks {
-					st.held[i] = max(st.held[i], v)
-				}
-				copy(st.avgs, avg)
 			}
 			dirty = true
 		case <-flush.C:
@@ -282,9 +330,9 @@ func (m *Meter) Run(ctx context.Context) {
 
 // measure runs w's streams until ctx is done, waiting longer after each
 // that fails before it makes another, and sends their peaks to updates.
-func (m *Meter) measure(ctx context.Context, w *worker, key uint32, updates chan<- level) {
+func (m *Meter) measure(ctx context.Context, w *worker, updates chan<- level) {
 	send := func(peaks, avgs []float64) bool {
-		l := level{w: w, key: key, n: -1}
+		l := level{w: w, n: -1}
 		if peaks != nil {
 			l.n = len(peaks)
 			if len(peaks) <= inlineChannels {
@@ -359,10 +407,11 @@ func (m *Meter) stream(ctx context.Context, t Target, send func(peaks, avgs []fl
 	case Stream:
 		nodeName = fmt.Sprintf("%sstream.%d.%d", m.Prefix, t.Serial, m.seq.Add(1))
 	}
+	rate := cmp.Or(t.Rate, m.rate)
 	nc.SetReadDeadline(time.Now().Add(createWait))
-	m.log.Printf("pulse: %v: creating a record stream; the reply waits for the node to run", t)
+	m.log.Printf("pulse: %v: creating a record stream at %d peaks a second; the reply waits for the node to run", t, rate)
 	asked := time.Now()
-	index, channels, err := c.create(t, m.rate, nodeName)
+	index, channels, err := c.create(t, rate, nodeName)
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
 		return false, errIdle
@@ -382,8 +431,8 @@ func (m *Meter) stream(ctx context.Context, t Target, send func(peaks, avgs []fl
 	avgs := make([]float64, channels)
 	last := make([]float64, 0, channels)
 	lastAvgs := make([]float64, 0, channels)
-	alpha := 1 - math.Exp(-1/(float64(m.rate)*averageTime.Seconds()))
-	timeout := max(stale, 3*m.Interval())
+	alpha := 1 - math.Exp(-1/(float64(rate)*averageTime.Seconds()))
+	timeout := max(stale, 3*time.Second/time.Duration(rate))
 	var lastAt time.Time
 	armed := false
 	arm := func(now time.Time) {
