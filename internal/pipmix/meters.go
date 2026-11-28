@@ -73,9 +73,17 @@ func (m *mixer) nextMeter() command {
 	}
 }
 
+// metersOff reports whether no meter is drawn now: -meter.enable is false,
+// the meters are toggled off, the help shows, or the terminal isn't focused
+// and the meters only run while it is. Hide rules with when = "silent" still
+// listen to the levels of the nodes they match.
 func (m *mixer) metersOff() bool {
-	return m.help || m.blurred && m.opts.meters != metersAlways || m.metersHidden
+	return m.metersDisabled() || m.help || m.blurred && m.opts.meters != metersAlways || m.metersHidden
 }
+
+// metersDisabled reports whether the mixer never draws meters, because
+// -meter.enable is false.
+func (m *mixer) metersDisabled() bool { return m.opts.meters == metersOff }
 
 // meterTargets returns the visible nodes that can be metered.
 func (m *mixer) meterTargets() map[uint32]pulse.Target {
@@ -187,7 +195,8 @@ func (m *mixer) watchMetersItems(items []item) {
 	if m.meter == nil {
 		return
 	}
-	targets := m.meterTargetsItems(items)
+	targets, unshown := m.silentTargets(m.meterTargetsItems(items))
+	m.unshown = unshown
 	if maps.EqualFunc(targets, m.watched, pulse.Target.Equal) {
 		return
 	}
@@ -208,7 +217,7 @@ func (m *mixer) startMetering() command {
 	if m.ticking {
 		return nil
 	}
-	if !m.setLevels(m.meterSnapshot(), time.Now()) {
+	if !m.readLevels() {
 		return m.waitMeter()
 	}
 	m.ticking = true
@@ -218,11 +227,34 @@ func (m *mixer) startMetering() command {
 // tickMetering moves the meters on. The event loop calls it every frame
 // while m.ticking is set.
 func (m *mixer) tickMetering() command {
-	if !m.setLevels(m.meterSnapshot(), time.Now()) {
+	if !m.readLevels() {
 		m.ticking = false
 		return m.waitMeter()
 	}
 	return nil
+}
+
+// readLevels passes the latest levels to the hide rules and, if the meters
+// show, updates them, reporting whether any is still moving. If the meters
+// don't show, only hide rules listen: nothing moves, and the levels shown go.
+func (m *mixer) readLevels() (moving bool) {
+	snap, now := m.meterSnapshot(), time.Now()
+	m.hear(snap, now)
+	if m.metersOff() {
+		m.clearLevels()
+		return false
+	}
+	return m.setLevels(snap, now)
+}
+
+// clearLevels forgets the levels shown, so the meters show none, and asks
+// for a redraw if there were any.
+func (m *mixer) clearLevels() {
+	if len(m.fill) == 0 && len(m.dot) == 0 {
+		return
+	}
+	m.fill, m.fillStart, m.dot, m.dotHold = nil, nil, nil, nil
+	m.redraw = true
 }
 
 // setLevels updates the fill and peak positions at now and reports whether
@@ -309,6 +341,9 @@ func (m *mixer) setLevels(snap *pulse.Snapshot, now time.Time) (moving bool) {
 // meterNode returns the node that raw levels for id belong to, or nil if
 // they are not shown.
 func (m *mixer) meterNode(id uint32, raw []float64) *pw.Node {
+	if m.unshown[id] {
+		return nil
+	}
 	for i := range m.snap.Nodes {
 		if n := &m.snap.Nodes[i]; n.ID == id && len(n.Channels) > 0 {
 			if len(raw) != len(n.Channels) {
@@ -395,7 +430,7 @@ func channelLevel(levels []float64, ch int) float64 {
 func (m *mixer) toggleMeterAlways() command {
 	switch m.opts.meters {
 	case metersOff:
-		return notify("Meters are off (-meter.disable)")
+		return notify("Meters are off (-meter.enable=false)")
 	case metersAlways:
 		m.opts.meters = metersFocused
 		return notify("Meters only while the terminal is focused")
@@ -405,8 +440,8 @@ func (m *mixer) toggleMeterAlways() command {
 }
 
 func (m *mixer) toggleMeters() command {
-	if m.meter == nil {
-		return notify("Meters are off (-meter.disable)")
+	if m.meter == nil || m.metersDisabled() {
+		return notify("Meters are off (-meter.enable=false)")
 	}
 	m.metersHidden = !m.metersHidden
 	if m.metersHidden {
@@ -416,7 +451,7 @@ func (m *mixer) toggleMeters() command {
 }
 
 func (m *mixer) look() meterLook {
-	if m.metersHidden || m.meter == nil {
+	if m.metersHidden || m.meter == nil || m.metersDisabled() {
 		return meterOff
 	}
 	return m.opts.meterLook

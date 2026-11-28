@@ -46,7 +46,7 @@ fps = 60          # max redraws per second (1 to 240)
 tab = "default"   # starting tab: default, playback, recording, outputs, inputs, cards (or 1 to 6)
 
 [meter]
-enable = true
+enable = true     # draw level meters
 always = false    # keep metering when the terminal is unfocused
 rate = 40         # peaks per second per meter (1 to 200)
 mode = "both"     # both, average, or peak
@@ -77,6 +77,13 @@ inputs = "off"        # input devices: off, active (those in use, and 5s after),
 `[[default.hide]]` rules hide nodes from the Default tab; the other tabs still list everything. They can only be set in the config file. A node is hidden while any rule matching it says so, even when focused.
 
 ```toml
+# Hide FluidSynth once it has been silent for 5 seconds.
+[[default.hide]]
+match = { type = "playback", name = "^FluidSynth$" }
+when = "silent"
+after = "5s"
+threshold = -80   # dBFS; quieter peaks count as silence
+
 # Hide Firefox's streams while they don't run.
 [[default.hide]]
 match = { binary = "firefox" }
@@ -101,7 +108,8 @@ after = "0s"
   - `always` (the default): always.
   - `idle`: while nothing plays or records through the node.
   - `muted`: while the node is muted. A volume of 0% doesn't count.
-- `after` is how long `idle` or `muted` must last before the node hides; it is 10s unless set. A node shows again as soon as the condition ends, and nodes start out hidden if the condition already holds.
+  - `silent`: while its level stays below `threshold` (-80 dBFS unless set). Muted nodes and nodes at 0% stay visible; use `muted` for those.
+- `after` is how long `idle`, `muted`, or `silent` must last before the node hides; it is 10s unless set. A node shows again as soon as the condition ends, and nodes start out hidden if the condition already holds.
 
 ## Technical Details
 

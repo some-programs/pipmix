@@ -159,6 +159,166 @@ func TestHideAlwaysAndIdle(t *testing.T) {
 	}
 }
 
+// With -meter.enable=false no meter is drawn, and a silent rule still
+// listens to the node it matches, at the low rate.
+func TestHideSilentMetersDisabled(t *testing.T) {
+	now := time.Now()
+	opts := defaultOptions()
+	opts.meters = metersOff
+	m := activityMixer(opts, rule(nameIs("FluidSynth"), hideSilent, 30*time.Second))
+	m.refreshShown(now)
+	m.watchMeters()
+	if keys := targetKeys(m.watched); !slices.Equal(keys, []uint32{10}) {
+		t.Fatalf("metered with -meter.enable=false: %v, want only FluidSynth", keys)
+	}
+	if got := m.watched[10].Rate; got != listenRate {
+		t.Errorf("FluidSynth metered at rate %d, want %d", got, listenRate)
+	}
+}
+
+func TestHideSilent(t *testing.T) {
+	t.Run("heard, then silent", func(t *testing.T) {
+		now := time.Now()
+		m := activityMixer(defaultOptions(), rule(nameIs("FluidSynth"), hideSilent, 30*time.Second))
+		m.refreshShown(now)
+		wantShown(t, m, 10, "playing FluidSynth hidden before the meter has levels for it")
+		if targets, _ := m.silentTargets(nil); targets[10].Serial != 100 {
+			t.Errorf("FluidSynth not metered: %v", targets)
+		}
+
+		quiet := &pulse.Snapshot{Peaks: map[uint32][]float64{10: {0.00005, 0}}}
+		m.hear(quiet, now)
+		wantHidden(t, m, 10, "FluidSynth shown at -86 dBFS")
+		// Hidden, its levels move no meter, so the render loop can rest.
+		m.watchMeters()
+		levels := map[uint32][]float64{10: {0.00005, 0}}
+		m.setLevels(&pulse.Snapshot{Peaks: levels, Averages: levels}, now)
+		levels = map[uint32][]float64{10: {0.0001, 0.0003}}
+		if m.setLevels(&pulse.Snapshot{Peaks: levels, Averages: levels}, now.Add(20*time.Millisecond)) {
+			t.Error("levels of hidden FluidSynth keep the meters moving")
+		}
+		loud := &pulse.Snapshot{Peaks: map[uint32][]float64{10: {0, 0.5}}}
+		m.hear(loud, now.Add(time.Second))
+		wantShown(t, m, 10, "playing FluidSynth hidden")
+		if want := now.Add(31 * time.Second); !m.act.wakeAt.Equal(want) {
+			t.Errorf("wake at %v, want %v", m.act.wakeAt, want)
+		}
+
+		// With the terminal not focused, the meters on screen pause, but
+		// FluidSynth's goes on, at the lower rate that is enough for the
+		// rule.
+		m.watchMeters()
+		if got := m.watched[10].Rate; got != 0 {
+			t.Errorf("FluidSynth metered at rate %d while its meter shows, want 0 for the meter's rate", got)
+		}
+		m.blurred = true
+		m.watchMeters()
+		if keys := targetKeys(m.watched); !slices.Equal(keys, []uint32{10}) {
+			t.Errorf("metered while the terminal isn't focused: %v, want only FluidSynth", keys)
+		}
+		if got := m.watched[10].Rate; got != listenRate {
+			t.Errorf("FluidSynth metered at rate %d while the terminal isn't focused, want %d", got, listenRate)
+		}
+		m.opts.meterRate = 2
+		m.watchMeters()
+		if got := m.watched[10].Rate; got != 2 {
+			t.Errorf("FluidSynth metered at rate %d with -meter.rate 2, want 2", got)
+		}
+	})
+	t.Run("at a low volume", func(t *testing.T) {
+		// At 19% the volume multiplies levels by 0.19 cubed, about 0.0069.
+		// A peak of 0.00005 is below the threshold of 0.0001 as measured,
+		// and above it as the level at 100%, about 0.0073.
+		now := time.Now()
+		m := activityMixer(defaultOptions(), rule(nameIs("FluidSynth"), hideSilent, 10*time.Second))
+		m.refreshShown(now)
+		peaks := &pulse.Snapshot{Peaks: map[uint32][]float64{10: {0.00005, 0}}}
+		m.hear(peaks, now)
+		wantHidden(t, m, 10, "FluidSynth at 100% shown at -86 dBFS")
+
+		setNode(m, 10, func(n *pw.Node) { n.Channels = stereo(0.19) }, now)
+		m.hear(&pulse.Snapshot{Peaks: peaks.Peaks}, now.Add(time.Second))
+		wantShown(t, m, 10, "FluidSynth at 19% hidden while it sends -43 dBFS")
+		// The same factor applies to the noise floor: 0.0000005 measured
+		// at 19% is about -83 dBFS at 100%, below the threshold.
+		m.hear(&pulse.Snapshot{Peaks: map[uint32][]float64{10: {0.0000005, 0}}}, now.Add(2*time.Second))
+		m.refreshShown(now.Add(11*time.Second + time.Millisecond))
+		wantHidden(t, m, 10, "FluidSynth at 19% shown 10s after its last peak above the threshold")
+
+		// Output devices are measured before their volume.
+		if got := volumeGain(&pw.Node{Class: pw.Sink, Channels: stereo(0.5)}); got != nil {
+			t.Errorf("volumeGain of an output device = %v, want nil", got)
+		}
+	})
+	t.Run("unmetered", func(t *testing.T) {
+		now := time.Now()
+		m := activityMixer(defaultOptions(), rule(nameIs("obs"), hideSilent, time.Second))
+		setState(m, 30, pw.StateRunning, now)
+		m.refreshShown(now.Add(time.Hour))
+		wantShown(t, m, 30, "silent rule hid a stream it can't meter")
+	})
+	t.Run("at 0% or muted", func(t *testing.T) {
+		now := time.Now()
+		m := activityMixer(defaultOptions(), rule(nameIs("FluidSynth"), hideSilent, 10*time.Second))
+		m.refreshShown(now)
+		m.hear(&pulse.Snapshot{Peaks: map[uint32][]float64{10: {0, 0}}}, now)
+		m.refreshShown(now)
+		wantHidden(t, m, 10, "never-heard FluidSynth shown")
+		for i, tc := range []struct {
+			name string
+			set  func(n *pw.Node)
+		}{
+			{"at 0%", func(n *pw.Node) { n.Channels = stereo(0) }},
+			{"muted", func(n *pw.Node) { n.Mute = true }},
+		} {
+			start := now.Add(time.Duration(i) * time.Hour)
+			setNode(m, 10, tc.set, start)
+			m.refreshShown(start.Add(time.Minute))
+			wantShown(t, m, 10, "FluidSynth %s hidden", tc.name)
+			// Turned up again a while later, it gets the rule's after
+			// before hiding.
+			up := start.Add(5 * time.Minute)
+			setNode(m, 10, func(n *pw.Node) { n.Channels, n.Mute = stereo(1), false }, up)
+			wantShown(t, m, 10, "FluidSynth hidden as soon as turned up from %s", tc.name)
+			m.refreshShown(up.Add(9 * time.Second))
+			wantShown(t, m, 10, "FluidSynth hidden 9s after %s", tc.name)
+			m.refreshShown(up.Add(10 * time.Second))
+			wantHidden(t, m, 10, "FluidSynth shown 10s after %s", tc.name)
+		}
+		if inaudible(&pw.Node{Class: pw.Recording, Mute: true, Channels: stereo(1)}) {
+			t.Error("a muted recording stream's meter reads silence, but it is measured before its mute")
+		}
+	})
+	t.Run("no meter levels", func(t *testing.T) {
+		now := time.Now()
+		m := activityMixer(defaultOptions(), rule(nameIs("FluidSynth"), hideSilent, 10*time.Second))
+		m.refreshShown(now)
+		wantShown(t, m, 10, "playing FluidSynth hidden with the meter down")
+		if !m.act.wakeAt.IsZero() {
+			t.Errorf("wake at %v with nothing to wait for", m.act.wakeAt)
+		}
+		// The meter comes up and reads silence, then loses the stream again.
+		up := now.Add(time.Minute)
+		m.hear(&pulse.Snapshot{Peaks: map[uint32][]float64{10: {0, 0}}}, up)
+		wantHidden(t, m, 10, "silent FluidSynth shown once metered")
+		m.hear(&pulse.Snapshot{}, up.Add(time.Minute))
+		wantShown(t, m, 10, "FluidSynth hidden after the meter lost it")
+	})
+	t.Run("idle", func(t *testing.T) {
+		now := time.Now()
+		m := activityMixer(defaultOptions(), rule(nameIs("FluidSynth"), hideSilent, 10*time.Second))
+		m.refreshShown(now)
+		m.hear(&pulse.Snapshot{Peaks: map[uint32][]float64{10: {0.5, 0.5}}}, now)
+		wantShown(t, m, 10, "playing FluidSynth hidden")
+		setState(m, 10, pw.StateIdle, now)
+		if targets, _ := m.silentTargets(nil); len(targets) != 0 {
+			t.Errorf("idle FluidSynth metered: %v", targets)
+		}
+		m.refreshShown(now.Add(10 * time.Second))
+		wantHidden(t, m, 10, "idle FluidSynth shown after 10s")
+	})
+}
+
 func TestHideFocused(t *testing.T) {
 	now := time.Now()
 	m := activityMixer(defaultOptions(), rule(nameIs("firefox"), hideIdle, time.Second))

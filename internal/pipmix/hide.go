@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"regexp"
 	"slices"
@@ -20,14 +21,22 @@ import (
 // rule sets after.
 const defaultHideAfter = 10 * time.Second
 
+// defaultThreshold is the level, in dBFS, below which a silent rule
+// counts a node as silent, unless the rule sets threshold. It is just above
+// the dither noise of 16-bit audio, about -90 dBFS.
+const defaultThreshold = -80.0
+
 // A hideRule is a [[default.hide]] table: it hides the nodes it matches
 // from the Default tab while its condition holds.
 type hideRule struct {
-	Match nodeMatch     `toml:"match"`
-	When  hideWhen      `toml:"when"`
-	After *tomlDuration `toml:"after"`
+	Match     nodeMatch     `toml:"match"`
+	When      hideWhen      `toml:"when"`
+	After     *tomlDuration `toml:"after"`
+	Threshold *float64      `toml:"threshold"` // dBFS
 
-	after time.Duration
+	after     time.Duration
+	threshold float64 // dBFS
+	level     float64 // threshold as a linear peak
 }
 
 // A hideWhen is the condition under which a rule hides a node.
@@ -36,10 +45,11 @@ type hideWhen int
 const (
 	hideAlways hideWhen = iota // always
 	hideIdle                   // the node isn't active
+	hideSilent                 // the node's peaks stay below the threshold
 	hideMuted                  // the node is muted; 0% isn't enough
 )
 
-var hideWhenNames = []string{"always", "idle", "muted"}
+var hideWhenNames = []string{"always", "idle", "silent", "muted"}
 
 func (w hideWhen) String() string { return hideWhenNames[w] }
 
@@ -143,6 +153,9 @@ func (r hideRule) String() string {
 	if r.When != hideAlways {
 		s += fmt.Sprintf(", after = %q", r.after)
 	}
+	if r.When == hideSilent {
+		s += fmt.Sprintf(", threshold = %g", r.threshold)
+	}
 	return s
 }
 
@@ -200,10 +213,19 @@ func (r *hideRule) check() error {
 		return errors.New("match: want at least one of type, name, description, app, binary")
 	case r.When == hideAlways && r.After != nil:
 		return errors.New(`after: not used with when = "always"`)
+	case r.When != hideSilent && r.Threshold != nil:
+		return errors.New(`threshold: only used with when = "silent"`)
+	case r.Threshold != nil && *r.Threshold > 0:
+		return fmt.Errorf("threshold %g: want 0 dBFS or less", *r.Threshold)
 	}
 	r.after = defaultHideAfter
 	if r.After != nil {
 		r.after = time.Duration(*r.After)
 	}
+	r.threshold = defaultThreshold
+	if r.Threshold != nil {
+		r.threshold = *r.Threshold
+	}
+	r.level = math.Pow(10, r.threshold/20)
 	return nil
 }

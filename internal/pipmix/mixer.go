@@ -116,6 +116,7 @@ type mixer struct {
 	mediaPlayers map[uint32]mpris.Player
 	meter        *pulse.Meter
 	watched      map[uint32]pulse.Target
+	unshown      map[uint32]bool // nodes watched only for silent rules, with no meter on screen
 	fill         map[uint32][]float64
 	fillStart    map[uint32]time.Time
 	dot          map[uint32][]float64
@@ -158,9 +159,6 @@ type mixer struct {
 }
 
 func newMixer(c *pw.Client, media *mpris.Watcher, meter *pulse.Meter, quitKeys section, opts options) mixer {
-	if opts.meters == metersOff {
-		meter = nil
-	}
 	return mixer{
 		client: c, snap: c.Snapshot(), media: media, meter: meter, quitKeys: quitKeys, opts: opts,
 		tab: opts.tab, meterMode: opts.meterMode, smoothing: opts.smoothing,
