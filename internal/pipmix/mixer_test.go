@@ -761,6 +761,34 @@ func TestPlaybackGrouping(t *testing.T) {
 	}
 }
 
+func TestRecordingGrouping(t *testing.T) {
+	m := newMixer(pw.NewClient(nil), nil, nil, quitKeys(), defaultOptions())
+	chrome := map[string]string{"application.process.id": "14744", "media.name": "RecordStream"}
+	m.snap = &pw.Snapshot{Connected: true, Nodes: []pw.Node{
+		{ID: 98, Class: pw.Recording, Name: "Google Chrome input", Client: "Google Chrome input", Title: "Google Chrome input: RecordStream", Props: chrome, From: []uint32{44}, Channels: stereo(1)},
+		{ID: 144, Class: pw.Recording, Name: "Google Chrome input", Client: "Google Chrome input", Title: "Google Chrome input: RecordStream", Props: chrome, From: []uint32{44}, Channels: stereo(1)},
+		{ID: 150, Class: pw.Recording, Name: "Google Chrome input", Client: "Google Chrome input", Title: "Google Chrome input: RecordStream", Props: chrome, From: []uint32{35}, Channels: stereo(1)},
+		{ID: 220, Class: pw.Playback, Name: "Google Chrome", Client: "Google Chrome", Title: "Google Chrome: Playback", Props: map[string]string{"application.process.id": "14744"}, Channels: stereo(1)},
+	}}
+	m.setSize(80, 20)
+	m.refocus()
+	for _, tab := range []tab{tabRecording} {
+		var recs []item
+		for _, it := range m.items(tab) {
+			switch {
+			case it.id == 98 || it.id == 144:
+				recs = append(recs, it)
+			case it.groupKey != "":
+				t.Errorf("tab %d: %d grouped with %q", tab, it.id, it.groupKey)
+			}
+		}
+		if len(recs) != 2 || recs[0].groupKey == "" || recs[0].groupKey != recs[1].groupKey ||
+			!recs[0].groupLeader || recs[1].groupLeader || recs[0].groupTitle != "Google Chrome input" {
+			t.Errorf("tab %d: streams recording from one source not grouped: %+v", tab, recs)
+		}
+	}
+}
+
 func TestToggleSolo(t *testing.T) {
 	m := testMixer()
 	findNode := func(id uint32) *pw.Node {

@@ -1,6 +1,7 @@
 package pipmix
 
 import (
+	"fmt"
 	"slices"
 	"strconv"
 	"time"
@@ -345,61 +346,63 @@ func (m *mixer) items(t tab) []item {
 		}
 	}
 	all := append(items, fixed...)
+	if t == tabRecording {
+		return groupStreams(all)
+	}
 	if t != tabDefault && t != tabPlayback {
 		return all
 	}
 	if m.opts.dedup {
 		all = filterDuplicates(all)
 	}
-	return groupPlaybackItems(all)
+	return groupStreams(all)
 }
 
-func playbackGroupKey(it item) string {
-	if it.node == nil || it.node.Class != pw.Playback || it.node.JACK {
+// streamGroupKey returns a key that is equal for streams that belong in
+// the same group: playback streams of one process that play to the same
+// nodes, or recording streams of one process that record from the same
+// nodes. It returns "" if it is not a stream or can't be grouped.
+func streamGroupKey(it item) string {
+	n := it.node
+	if n == nil || n.JACK || n.Class != pw.Playback && n.Class != pw.Recording {
 		return ""
 	}
-	return it.node.Props["application.process.id"]
+	pid := n.Props["application.process.id"]
+	if pid == "" {
+		return ""
+	}
+	return fmt.Sprintf("%d %s %v %v", n.Class, pid, n.From, n.To)
 }
 
-// groupPlaybackItems groups multiple playback streams from the same application
-// so they appear together under a single application header.
-func groupPlaybackItems(items []item) []item {
-	hasGroups := false
-scan:
-	for i := range items {
-		ki := playbackGroupKey(items[i])
-		if ki == "" {
-			continue
-		}
-		for j := i + 1; j < len(items); j++ {
-			if playbackGroupKey(items[j]) == ki {
-				hasGroups = true
-				break scan
-			}
-		}
-	}
-	if !hasGroups {
-		return items
-	}
+// groupStreams groups multiple playback or recording streams from the same
+// application so they appear together under a single application header.
+func groupStreams(items []item) []item {
+	keys := make([]string, len(items))
 	counts := make(map[string]int)
-	for _, it := range items {
-		if k := playbackGroupKey(it); k != "" {
+	grouped := false
+	for i, it := range items {
+		if k := streamGroupKey(it); k != "" {
+			keys[i] = k
 			counts[k]++
+			grouped = grouped || counts[k] > 1
 		}
+	}
+	if !grouped {
+		return items
 	}
 
 	groupItems := make(map[string][]item)
-	for _, it := range items {
-		if k := playbackGroupKey(it); k != "" && counts[k] > 1 {
+	for i, it := range items {
+		if k := keys[i]; counts[k] > 1 {
 			groupItems[k] = append(groupItems[k], it)
 		}
 	}
 
 	var res []item
 	placed := make(map[string]bool)
-	for _, it := range items {
-		k := playbackGroupKey(it)
-		if k == "" || counts[k] <= 1 {
+	for i, it := range items {
+		k := keys[i]
+		if counts[k] <= 1 {
 			res = append(res, it)
 			continue
 		}
