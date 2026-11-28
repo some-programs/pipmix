@@ -86,6 +86,7 @@ type fakeServer struct {
 type fakeConn struct {
 	c        net.Conn
 	channels int
+	rate     uint32 // the peaks a second asked for
 	source   string // the source name asked for
 	direct   uint32 // direct_on_input
 	closed   chan struct{}
@@ -135,8 +136,8 @@ func (s *fakeServer) serve(c net.Conn) {
 			b = reply(tag)
 			b.u32(1)
 		case cmdCreateRecordStream:
-			_, ch, _ := r.sampleSpec()
-			fc.channels = int(ch)
+			_, ch, rate := r.sampleSpec()
+			fc.channels, fc.rate = int(ch), rate
 			// Skip the channel map and the source index to the name.
 			r.take(2 + int(ch))
 			r.u32()
@@ -526,4 +527,80 @@ func TestMeterContinuousAndManyChannels(t *testing.T) {
 			t.Fatalf("levels dropped during continuous stream: %v, want %v", got, want)
 		}
 	}
+}
+
+func TestMeterShared(t *testing.T) {
+	s := newFakeServer(t)
+	m := NewMeter(nil, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	mic := Target{Kind: Source, Name: "mic", Channels: []string{"FL", "FR"}}
+	m.Watch(map[uint32]Target{290: mic, 310: mic})
+	a := s.conn()
+	select {
+	case c := <-s.conns:
+		t.Fatalf("a second stream on %q for an equal target", c.source)
+	case <-time.After(200 * time.Millisecond):
+	}
+	a.peaks(t, 0.5, 0.25)
+	waitLevels(t, m, func(l map[uint32][]float64) bool {
+		return slices.Equal(l[290], []float64{0.5, 0.25}) && slices.Equal(l[310], []float64{0.5, 0.25})
+	})
+
+	// One key going keeps the stream for the other.
+	m.Watch(map[uint32]Target{310: mic})
+	waitLevels(t, m, func(l map[uint32][]float64) bool { _, ok := l[290]; return !ok })
+	a.peaks(t, 0.75, 0.75)
+	waitLevels(t, m, func(l map[uint32][]float64) bool { return slices.Equal(l[310], []float64{0.75, 0.75}) })
+	select {
+	case <-a.closed:
+		t.Fatal("the shared stream closed while a key still watches it")
+	default:
+	}
+
+	// The last going closes it.
+	m.Watch(nil)
+	select {
+	case <-a.closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the shared stream stays open")
+	}
+}
+
+// A target that only changes its rate gets a new stream at that rate, and
+// its key stays in the snapshots while the stream is replaced.
+func TestMeterRateChange(t *testing.T) {
+	s := newFakeServer(t)
+	m := NewMeter(nil, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	mic := Target{Kind: Source, Name: "mic", Channels: []string{"FL", "FR"}}
+	m.Watch(map[uint32]Target{1: mic})
+	a := s.conn()
+	if a.rate != DefaultRate {
+		t.Errorf("first stream asks for %d peaks a second, want %d", a.rate, DefaultRate)
+	}
+	a.peaks(t, 0.5, 0.25)
+	waitLevels(t, m, func(l map[uint32][]float64) bool { return slices.Equal(l[1], []float64{0.5, 0.25}) })
+
+	slow := mic
+	slow.Rate = 4
+	m.Watch(map[uint32]Target{1: slow})
+	b := s.conn()
+	if b.rate != 4 {
+		t.Errorf("second stream asks for %d peaks a second, want 4", b.rate)
+	}
+	select {
+	case <-a.closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream at the old rate stays open")
+	}
+	// The key stays, at 0, until the new stream sends levels.
+	waitLevels(t, m, func(l map[uint32][]float64) bool { return slices.Equal(l[1], []float64{0, 0}) })
+	b.peaks(t, 0.75, 0.5)
+	waitLevels(t, m, func(l map[uint32][]float64) bool { return slices.Equal(l[1], []float64{0.75, 0.5}) })
 }
